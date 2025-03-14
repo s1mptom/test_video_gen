@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-gap", type=int, default=4, help="Промежуток между патчами (пикс)")
     
     # Параметры цветов и видео
-    parser.add_argument("--color-range", type=float, default=100.0,
+    parser.add_argument("--color-range", type=float, default=10.0,
                       help="Процент цветового диапазона [0-100]")
     parser.add_argument("--bit-depth", type=int, default=8, help="Глубина цвета (бит)")
     parser.add_argument("--fps", type=int, default=30, help="Частота кадров")

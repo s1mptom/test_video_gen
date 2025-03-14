@@ -8,12 +8,15 @@
 
 import os
 import argparse
+import json
 from pathlib import Path
 from typing import Tuple, Optional
 
 from src.pattern_generator import PatternGenerator
 from src.video_processor import VideoProcessor
 from src.validation_processor import ValidationProcessor
+from src.visual_validation.visual_validator import VisualValidationProcessor
+from src.pattern_metadata import PatternMetadataHandler
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +56,8 @@ def parse_args() -> argparse.Namespace:
                       help="Допустимое отклонение при валидации")
     parser.add_argument("--max-miss-percent", type=float, default=0.002,
                       help="Максимальный процент ошибок при валидации")
+    parser.add_argument("--skip-visual-validation", action="store_true", 
+                      help="Пропустить визуальную валидацию")
     
     return parser.parse_args()
 
@@ -87,6 +92,14 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     
     video_processor = VideoProcessor(output_dir=args.output_dir)
     validation_processor = ValidationProcessor(debug_mode=args.debug, debug_dir=debug_dir)
+    metadata_handler = PatternMetadataHandler(output_dir=args.output_dir)
+    visual_validator = VisualValidationProcessor(
+        output_dir=args.output_dir, debug_mode=args.debug, debug_dir=debug_dir)
+    
+    # Сохраняем метаданные для каждого паттерна
+    print("Сохранение метаданных паттернов...")
+    for pattern_idx in range(pattern_generator.patterns_count):
+        pattern_generator.save_pattern_metadata(pattern_idx, metadata_handler)
     
     # Генерируем Y4M
     y4m_path, expected_frames, intro_frames_count = video_processor.generate_y4m(
@@ -119,6 +132,29 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
         intro_frames_count=intro_frames_count
     )
     
+    # Запускаем визуальную валидацию (если не отключена)
+    visual_validation_result = True
+    if not args.skip_visual_validation:
+        print("\nЗапуск визуальной валидации...")
+        visual_validation_result, validation_stats = visual_validator.visual_validate(
+            video_processor=video_processor,
+            y4m_path=validation_y4m,
+            pattern_generator=pattern_generator,
+            frames_per_pattern=args.frames_per_pattern,
+            intro_frames_count=intro_frames_count,
+            deviation=args.deviation,
+            max_miss_percent=args.max_miss_percent
+        )
+        
+        # Сохраняем статистику визуальной валидации
+        if args.debug:
+            stats_path = output_dir / "visual_validation_stats.json"
+            with open(stats_path, 'w') as f:
+                json.dump(validation_stats, f, indent=2)
+    
+    # Общий результат валидации (технической и визуальной)
+    overall_valid = is_valid and visual_validation_result
+    
     # Очистка
     if os.path.exists(validation_y4m) and not args.debug:
         os.remove(validation_y4m)
@@ -126,7 +162,7 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     if os.path.exists(y4m_path) and not args.debug:
         os.remove(y4m_path)
     
-    return is_valid, mp4_path
+    return overall_valid, mp4_path
 
 
 def main() -> None:

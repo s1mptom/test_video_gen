@@ -297,66 +297,16 @@ class PatternGenerator:
             frame['V'][coords.y_uv_range[0]:coords.y_uv_range[1], 
                      coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
     
-    def _draw_anchor_start(self, frame: Dict[str, np.ndarray]) -> None:
-        """
-        Рисует начальную якорную метку (2 патча с шахматным узором ЧБ/БЧ).
-        
-        Args:
-            frame: Буфер кадра
-        """
-        # Используем первые 2 патча в маркерах
-        for i in range(2):
-            patch_idx = self.marker_indices[i]
-            coords = self.patch_coords[patch_idx]
-            
-            y_range = coords.y_range
-            x_range = coords.x_range
-            y_uv_range = coords.y_uv_range
-            x_uv_range = coords.x_uv_range
-            
-            # Разделяем патч на 4 квадранта
-            half_size = self.patch_size // 2
-            half_size_uv = half_size // 2
-            
-            # Координаты для 4 квадрантов
-            quadrants_y = [
-                (y_range[0], y_range[0] + half_size, x_range[0], x_range[0] + half_size),  # верхний левый
-                (y_range[0], y_range[0] + half_size, x_range[0] + half_size, x_range[1]),  # верхний правый
-                (y_range[0] + half_size, y_range[1], x_range[0], x_range[0] + half_size),  # нижний левый
-                (y_range[0] + half_size, y_range[1], x_range[0] + half_size, x_range[1])   # нижний правый
-            ]
-            
-            quadrants_uv = [
-                (y_uv_range[0], y_uv_range[0] + half_size_uv, x_uv_range[0], x_uv_range[0] + half_size_uv),  # верхний левый
-                (y_uv_range[0], y_uv_range[0] + half_size_uv, x_uv_range[0] + half_size_uv, x_uv_range[1]),  # верхний правый
-                (y_uv_range[0] + half_size_uv, y_uv_range[1], x_uv_range[0], x_uv_range[0] + half_size_uv),  # нижний левый
-                (y_uv_range[0] + half_size_uv, y_uv_range[1], x_uv_range[0] + half_size_uv, x_uv_range[1])   # нижний правый
-            ]
-            
-            # Цвета для шахматного узора (черный и белый)
-            # Для первого патча: ЧБ/БЧ, для второго патча: БЧ/ЧБ
-            colors = [Y_BLACK, Y_WHITE] if i == 0 else [Y_WHITE, Y_BLACK]
-            
-            # Заполняем квадранты шахматным узором
-            for q in range(4):
-                y1, y2, x1, x2 = quadrants_y[q]
-                yuv1, yuv2, xuv1, xuv2 = quadrants_uv[q]
-                color = colors[0] if q % 3 == 0 else colors[1]  # Создаем шахматный узор
-                
-                # Y-плоскость
-                frame['Y'][y1:y2, x1:x2] = color
-                
-                # U и V плоскости (нейтральный серый)
-                frame['U'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
-                frame['V'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
-    
-    def _draw_pattern_number(self, frame: Dict[str, np.ndarray], pattern_index: int) -> None:
+    def _draw_pattern_number(self, frame: Dict[str, np.ndarray], pattern_index: int) -> str:
         """
         Рисует двоичное представление номера паттерна.
         
         Args:
             frame: Буфер кадра
             pattern_index: Номер паттерна для кодирования
+            
+        Returns:
+            str: Двоичное представление номера паттерна
         """
         # Преобразуем номер паттерна в N-битное двоичное представление
         binary = format(pattern_index, f'0{PATTERN_NUMBER_BITS}b')
@@ -367,25 +317,31 @@ class PatternGenerator:
             coords = self.patch_coords[patch_idx]
             
             # Определяем цвет (белый для 1, черный для 0)
+            # Используем экстремальные значения для максимального контраста
             color = Y_WHITE if bit == '1' else Y_BLACK
             
             # Заполняем Y-плоскость
             frame['Y'][coords.y_range[0]:coords.y_range[1], 
-                     coords.x_range[0]:coords.x_range[1]] = color
+                    coords.x_range[0]:coords.x_range[1]] = color
             
             # Заполняем U и V плоскости (нейтральный серый)
             frame['U'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                     coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
             frame['V'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                     coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+        
+        return binary
     
-    def _draw_checksum(self, frame: Dict[str, np.ndarray], pattern_index: int) -> None:
+    def _draw_checksum(self, frame: Dict[str, np.ndarray], pattern_index: int) -> str:
         """
         Рисует контрольную сумму для номера паттерна.
         
         Args:
             frame: Буфер кадра
             pattern_index: Номер паттерна для вычисления контрольной суммы
+            
+        Returns:
+            str: Двоичное представление контрольной суммы
         """
         # Преобразуем номер паттерна в N-битное двоичное представление
         binary = format(pattern_index, f'0{PATTERN_NUMBER_BITS}b')
@@ -406,28 +362,59 @@ class PatternGenerator:
             coords = self.patch_coords[patch_idx]
             
             # Определяем цвет (белый для 1, черный для 0)
+            # Используем экстремальные значения для максимального контраста
             color = Y_WHITE if bit == '1' else Y_BLACK
             
             # Заполняем Y-плоскость
             frame['Y'][coords.y_range[0]:coords.y_range[1], 
-                     coords.x_range[0]:coords.x_range[1]] = color
+                    coords.x_range[0]:coords.x_range[1]] = color
             
             # Заполняем U и V плоскости (нейтральный серый)
             frame['U'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                     coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
             frame['V'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                     coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+        
+        return checksum_binary
     
-    def _draw_anchor_end(self, frame: Dict[str, np.ndarray]) -> None:
+    def _draw_anchor_start(self, frame: Dict[str, np.ndarray]) -> None:
         """
-        Рисует конечную якорную метку (2 патча с шахматным узором БЧ/ЧБ).
+        Рисует высококонтрастную начальную якорную метку.
         
         Args:
             frame: Буфер кадра
         """
-        # Используем последние 2 патча в маркерах (индексы 18-19)
-        for i in range(2):
-            patch_idx = self.marker_indices[18 + i]
+        self._draw_checkered_pattern(frame, 0, 1, is_start=True)
+
+
+    def _draw_anchor_end(self, frame: Dict[str, np.ndarray]) -> None:
+        """
+        Рисует высококонтрастную конечную якорную метку.
+        
+        Args:
+            frame: Буфер кадра
+        """
+        self._draw_checkered_pattern(frame, 18, 19, is_start=False)
+
+
+    def _draw_checkered_pattern(
+        self, 
+        frame: Dict[str, np.ndarray], 
+        start_idx: int, 
+        end_idx: int, 
+        is_start: bool = True
+    ) -> None:
+        """
+        Рисует высококонтрастный шахматный узор для якорных меток.
+        
+        Args:
+            frame: Буфер кадра
+            start_idx: Начальный индекс в списке маркерных патчей
+            end_idx: Конечный индекс в списке маркерных патчей
+            is_start: True для начальной метки, False для конечной
+        """
+        for i in range(start_idx, end_idx + 1):
+            patch_idx = self.marker_indices[i]
             coords = self.patch_coords[patch_idx]
             
             y_range = coords.y_range
@@ -435,38 +422,103 @@ class PatternGenerator:
             y_uv_range = coords.y_uv_range
             x_uv_range = coords.x_uv_range
             
-            # Разделяем патч на 4 квадранта
-            half_size = self.patch_size // 2
-            half_size_uv = half_size // 2
+            # Разделяем патч на 4 квадранта с четкими границами
+            half_size_y = (y_range[1] - y_range[0]) // 2
+            half_size_x = (x_range[1] - x_range[0]) // 2
+            half_size_uv_y = (y_uv_range[1] - y_uv_range[0]) // 2
+            half_size_uv_x = (x_uv_range[1] - x_uv_range[0]) // 2
             
-            # Координаты для 4 квадрантов
+            # Координаты для 4 квадрантов (высокая точность)
             quadrants_y = [
-                (y_range[0], y_range[0] + half_size, x_range[0], x_range[0] + half_size),  # верхний левый
-                (y_range[0], y_range[0] + half_size, x_range[0] + half_size, x_range[1]),  # верхний правый
-                (y_range[0] + half_size, y_range[1], x_range[0], x_range[0] + half_size),  # нижний левый
-                (y_range[0] + half_size, y_range[1], x_range[0] + half_size, x_range[1])   # нижний правый
+                (y_range[0], y_range[0] + half_size_y, x_range[0], x_range[0] + half_size_x),  # верхний левый
+                (y_range[0], y_range[0] + half_size_y, x_range[0] + half_size_x, x_range[1]),  # верхний правый
+                (y_range[0] + half_size_y, y_range[1], x_range[0], x_range[0] + half_size_x),  # нижний левый
+                (y_range[0] + half_size_y, y_range[1], x_range[0] + half_size_x, x_range[1])   # нижний правый
             ]
             
             quadrants_uv = [
-                (y_uv_range[0], y_uv_range[0] + half_size_uv, x_uv_range[0], x_uv_range[0] + half_size_uv),  # верхний левый
-                (y_uv_range[0], y_uv_range[0] + half_size_uv, x_uv_range[0] + half_size_uv, x_uv_range[1]),  # верхний правый
-                (y_uv_range[0] + half_size_uv, y_uv_range[1], x_uv_range[0], x_uv_range[0] + half_size_uv),  # нижний левый
-                (y_uv_range[0] + half_size_uv, y_uv_range[1], x_uv_range[0] + half_size_uv, x_uv_range[1])   # нижний правый
+                (y_uv_range[0], y_uv_range[0] + half_size_uv_y, x_uv_range[0], x_uv_range[0] + half_size_uv_x),
+                (y_uv_range[0], y_uv_range[0] + half_size_uv_y, x_uv_range[0] + half_size_uv_x, x_uv_range[1]),
+                (y_uv_range[0] + half_size_uv_y, y_uv_range[1], x_uv_range[0], x_uv_range[0] + half_size_uv_x),
+                (y_uv_range[0] + half_size_uv_y, y_uv_range[1], x_uv_range[0] + half_size_uv_x, x_uv_range[1])
             ]
             
-            # Цвета для шахматного узора (черный и белый)
-            # Для первого патча: БЧ/ЧБ, для второго патча: ЧБ/БЧ
-            colors = [Y_WHITE, Y_BLACK] if i == 0 else [Y_BLACK, Y_WHITE]  # Инвертированные по отношению к начальному якорю
+            # Определяем паттерн цветов
+            # Начальная метка: 1-й патч (ЧБ/БЧ), 2-й патч (БЧ/ЧБ)
+            # Конечная метка: 1-й патч (БЧ/ЧБ), 2-й патч (ЧБ/БЧ) - инверсия начальной
+            if is_start:
+                # Для начальной метки
+                colors = [Y_BLACK, Y_WHITE] if i == start_idx else [Y_WHITE, Y_BLACK]
+            else:
+                # Для конечной метки (инверсия)
+                colors = [Y_WHITE, Y_BLACK] if i == start_idx else [Y_BLACK, Y_WHITE]
             
-            # Заполняем квадранты шахматным узором
+            # Заполняем квадранты шахматным узором с максимальной контрастностью
             for q in range(4):
                 y1, y2, x1, x2 = quadrants_y[q]
                 yuv1, yuv2, xuv1, xuv2 = quadrants_uv[q]
-                color = colors[0] if q % 3 == 0 else colors[1]  # Создаем шахматный узор
                 
-                # Y-плоскость
+                # Классический шахматный узор: верхний левый и нижний правый одного цвета,
+                # верхний правый и нижний левый - другого цвета
+                color = colors[0] if q in [0, 3] else colors[1]
+                
+                # Y-плоскость с максимальным контрастом
                 frame['Y'][y1:y2, x1:x2] = color
                 
-                # U и V плоскости (нейтральный серый)
+                # U и V плоскости (нейтральный серый) для чистого ч/б
                 frame['U'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
                 frame['V'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
+                
+    def save_pattern_metadata(self, pattern_index: int, metadata_handler) -> None:
+        """
+        Сохраняет метаданные о паттерне для последующей валидации.
+        
+        Args:
+            pattern_index: Индекс паттерна
+            metadata_handler: Обработчик метаданных
+        """
+        # Определяем какие цвета используются для этого паттерна
+        start_idx = pattern_index * self.available_patches
+        end_idx = min(start_idx + self.available_patches, len(self.colors))
+        colors = self.colors[start_idx:end_idx]
+        
+        # Дополняем недостающими цветами из начала списка если нужно
+        if len(colors) < self.available_patches:
+            colors = colors + self.colors[:self.available_patches-len(colors)]
+        
+        # Преобразуем все цвета в YUV за один раз с помощью векторизации
+        patches_count = min(len(colors), self.available_patches)
+        rgb_array = np.array(colors[:patches_count])
+        
+        # Быстрое преобразование RGB в YUV для всех цветов сразу
+        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array)
+        
+        # Сохраняем метаданные
+        metadata_handler.save_pattern_metadata(
+            pattern_index, colors, self.patch_coords,
+            y_values, u_values, v_values
+        )
+
+    def _draw_pattern_marker(self, frame: Dict[str, np.ndarray], pattern_index: int) -> None:
+        """
+        Добавляет маркер для идентификации паттерна в техническую строку.
+        
+        Args:
+            frame: Буфер кадра
+            pattern_index: Индекс паттерна
+        """
+        print(f"Добавление маркера для паттерна {pattern_index}")
+        
+        # 1. Начальная якорная метка (2 патча)
+        self._draw_anchor_start(frame)
+        
+        # 2. Двоичное представление номера паттерна (12 патчей)
+        binary = self._draw_pattern_number(frame, pattern_index)
+        
+        # 3. Контрольная сумма (4 патча)
+        checksum_binary = self._draw_checksum(frame, pattern_index)
+        
+        # 4. Конечная якорная метка (2 патча)
+        self._draw_anchor_end(frame)
+        
+        print(f"  Маркер паттерна: бинарно {binary}, контр. сумма {checksum_binary}")

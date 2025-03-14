@@ -539,27 +539,3 @@ class PatternGenerator:
         
         # Вызываем новый метод сохранения метаданных
         metadata_handler.save_pattern_metadata(pattern_index, metadata)
-    
-    def _draw_pattern_marker(self, frame: Dict[str, np.ndarray], pattern_index: int) -> None:
-        """
-        Добавляет маркер для идентификации паттерна в техническую строку.
-        
-        Args:
-            frame: Буфер кадра
-            pattern_index: Индекс паттерна
-        """
-        print(f"Добавление маркера для паттерна {pattern_index}")
-        
-        # 1. Начальная якорная метка (2 патча)
-        self._draw_anchor_start(frame)
-        
-        # 2. Двоичное представление номера паттерна (12 патчей)
-        binary = self._draw_pattern_number(frame, pattern_index)
-        
-        # 3. Контрольная сумма (4 патча)
-        checksum_binary = self._draw_checksum(frame, pattern_index)
-        
-        # 4. Конечная якорная метка (2 патча)
-        self._draw_anchor_end(frame)
-        
-        print(f"  Маркер паттерна: бинарно {binary}, контр. сумма {checksum_binary}")

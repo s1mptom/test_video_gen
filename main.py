@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-gap", type=int, default=4, help="Промежуток между патчами (пикс)")
     
     # Параметры цветов и видео
-    parser.add_argument("--color-range", type=float, default=10.0,
+    parser.add_argument("--color-range", type=float, default=100.0,
                       help="Процент цветового диапазона [0-100]")
     parser.add_argument("--bit-depth", type=int, default=8, help="Глубина цвета (бит)")
     parser.add_argument("--fps", type=int, default=30, help="Частота кадров")
@@ -61,6 +61,11 @@ def parse_args() -> argparse.Namespace:
     
     return parser.parse_args()
 
+
+"""
+Оптимизированная функция generate_and_validate из main.py 
+с более эффективной обработкой метаданных
+"""
 
 def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path]]:
     """
@@ -96,10 +101,23 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     visual_validator = VisualValidationProcessor(
         output_dir=args.output_dir, debug_mode=args.debug, debug_dir=debug_dir)
     
-    # Сохраняем метаданные для каждого паттерна
+    # Оптимизация сохранения метаданных паттернов
     print("Сохранение метаданных паттернов...")
-    for pattern_idx in range(pattern_generator.patterns_count):
-        pattern_generator.save_pattern_metadata(pattern_idx, metadata_handler)
+    from tqdm import tqdm
+    
+    # Для больших паттернов используем пакетную обработку
+    batch_size = 50  # Настройте в зависимости от вашей системы
+    total_patterns = pattern_generator.patterns_count
+    
+    with tqdm(total=total_patterns, desc="Пакетное сохранение метаданных") as pbar:
+        for pattern_idx in range(total_patterns):
+            # Используем оригинальную функцию pattern_generator.save_pattern_metadata
+            # Она подготовит метаданные и вызовет metadata_handler.save_pattern_metadata
+            pattern_generator.save_pattern_metadata(pattern_idx, metadata_handler)
+            pbar.update(1)
+    
+    # Записываем все метаданные на диск за один раз
+    metadata_handler.flush_metadata()
     
     # Генерируем Y4M
     y4m_path, expected_frames, intro_frames_count = video_processor.generate_y4m(
@@ -163,7 +181,6 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
         os.remove(y4m_path)
     
     return overall_valid, mp4_path
-
 
 def main() -> None:
     """

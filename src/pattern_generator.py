@@ -480,25 +480,66 @@ class PatternGenerator:
         # Определяем какие цвета используются для этого паттерна
         start_idx = pattern_index * self.available_patches
         end_idx = min(start_idx + self.available_patches, len(self.colors))
+        
+        # Оптимизация: берем нужные цвета сразу через срез
         colors = self.colors[start_idx:end_idx]
         
         # Дополняем недостающими цветами из начала списка если нужно
         if len(colors) < self.available_patches:
-            colors = colors + self.colors[:self.available_patches-len(colors)]
+            remaining_count = self.available_patches - len(colors)
+            colors = colors + self.colors[:remaining_count]
         
         # Преобразуем все цвета в YUV за один раз с помощью векторизации
         patches_count = min(len(colors), self.available_patches)
-        rgb_array = np.array(colors[:patches_count])
+        
+        # Оптимизация: используем numpy для более эффективной работы с массивами
+        rgb_array = np.array(colors[:patches_count], dtype=np.uint8)
         
         # Быстрое преобразование RGB в YUV для всех цветов сразу
         y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array)
         
-        # Сохраняем метаданные
-        metadata_handler.save_pattern_metadata(
-            pattern_index, colors, self.patch_coords,
-            y_values, u_values, v_values
-        )
-
+        # Преобразуем numpy-значения в Python-нативные типы
+        colors_python = []
+        for color in colors:
+            # Преобразуем каждый компонент RGB в обычный Python int
+            colors_python.append([int(c) if isinstance(c, (np.integer, np.floating)) else c for c in color])
+        
+        # Создаем структуру данных для сохранения
+        metadata = {
+            "pattern_idx": int(pattern_index),
+            "colors": colors_python,
+            "patches": []
+        }
+        
+        # Конвертируем numpy массивы в обычные Python списки
+        y_values_list = [int(val) for val in y_values]
+        u_values_list = [int(val) for val in u_values]
+        v_values_list = [int(val) for val in v_values]
+        
+        # Добавляем данные о патчах (исключая технические)
+        color_idx = 0
+        for i, coords in enumerate(self.patch_coords):
+            if not coords.is_tech:
+                patch_data = {
+                    "index": i,
+                    "y_range": [int(val) for val in coords.y_range],
+                    "x_range": [int(val) for val in coords.x_range],
+                    "y_uv_range": [int(val) for val in coords.y_uv_range],
+                    "x_uv_range": [int(val) for val in coords.x_uv_range]
+                }
+                
+                # Если предоставлены значения YUV, сохраняем их тоже
+                if color_idx < len(y_values_list):
+                    patch_data["y_value"] = y_values_list[color_idx]
+                    patch_data["u_value"] = u_values_list[color_idx]
+                    patch_data["v_value"] = v_values_list[color_idx]
+                
+                metadata["patches"].append(patch_data)
+                color_idx += 1
+        
+        # Вызываем новый метод сохранения метаданных
+        metadata_handler.save_pattern_metadata(pattern_index, metadata)
+    
     def _draw_pattern_marker(self, frame: Dict[str, np.ndarray], pattern_index: int) -> None:
         """
         Добавляет маркер для идентификации паттерна в техническую строку.

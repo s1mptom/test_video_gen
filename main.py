@@ -31,13 +31,13 @@ def parse_args() -> argparse.Namespace:
     )
     
     # Основные параметры
-    parser.add_argument("--width", type=int, default=1920, help="Ширина видео (пикс)")
-    parser.add_argument("--height", type=int, default=1080, help="Высота видео (пикс)")
+    parser.add_argument("--width", type=int, default=1280, help="Ширина видео (пикс)")
+    parser.add_argument("--height", type=int, default=720, help="Высота видео (пикс)")
     parser.add_argument("--patch-size", type=int, default=16, help="Размер цветового патча (пикс)")
     parser.add_argument("--patch-gap", type=int, default=4, help="Промежуток между патчами (пикс)")
     
     # Параметры цветов и видео
-    parser.add_argument("--color-range", type=float, default=10.0,
+    parser.add_argument("--color-range", type=float, default=20.0,
                       help="Процент цветового диапазона [0-100]")
     parser.add_argument("--bit-depth", type=int, default=8, help="Глубина цвета (бит)")
     parser.add_argument("--fps", type=int, default=30, help="Частота кадров")
@@ -101,19 +101,42 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     visual_validator = VisualValidationProcessor(
         output_dir=args.output_dir, debug_mode=args.debug, debug_dir=debug_dir)
     
+    config = {
+        "width": args.width,
+        "height": args.height,
+        "patch_size": args.patch_size,
+        "patch_gap": args.patch_gap,
+        "color_range_percent": args.color_range,
+        "bit_depth": args.bit_depth,
+        "fps": args.fps,
+        "frames_per_pattern": args.frames_per_pattern,
+        "add_intro": args.add_intro,
+        "generator_version": "1.0",
+    }
+
+    metadata_handler.save_config_metadata(config)
+
     # Оптимизация сохранения метаданных паттернов
     print("Сохранение метаданных паттернов...")
     from tqdm import tqdm
-    
+        
+    start_pattern_idx = 1  # Начальный индекс для нумерации
+
     # Для больших паттернов используем пакетную обработку
     batch_size = 50  # Настройте в зависимости от вашей системы
     total_patterns = pattern_generator.patterns_count
-    
+
     with tqdm(total=total_patterns, desc="Пакетное сохранение метаданных") as pbar:
         for pattern_idx in range(total_patterns):
-            # Используем оригинальную функцию pattern_generator.save_pattern_metadata
-            # Она подготовит метаданные и вызовет metadata_handler.save_pattern_metadata
-            pattern_generator.save_pattern_metadata(pattern_idx, metadata_handler)
+            # Используем смещенный индекс для сохранения (pattern_idx + start_pattern_idx)
+            real_idx = pattern_idx + start_pattern_idx
+            pattern_metadata = pattern_generator.generate_pattern_metadata(pattern_idx)
+            
+            # Заменяем индекс в метаданных на смещенный
+            pattern_metadata["pattern_idx"] = real_idx
+            
+            # Сохраняем с новым индексом
+            metadata_handler.save_pattern_metadata(real_idx, pattern_metadata)
             pbar.update(1)
     
     # Записываем все метаданные на диск за один раз

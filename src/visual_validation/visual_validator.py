@@ -45,7 +45,7 @@ class VisualValidationProcessor:
     
     def read_pattern_marker(self, frame: Dict[str, np.ndarray], pattern_generator) -> Tuple[int, Dict[str, Any]]:
         """
-        Считывает маркер паттерна из технической строки с исправленным алгоритмом.
+        Считывает маркер паттерна из технической строки с улучшенной проверкой якорных маркеров.
         
         Args:
             frame: Буфер кадра
@@ -58,7 +58,8 @@ class VisualValidationProcessor:
         diagnostics = {
             "pattern_bits": [],
             "checksum_bits": [],
-            "threshold": 0
+            "threshold": 0,
+            "anchor_check": False
         }
         
         # Получаем правильные маркерные патчи из технической строки
@@ -73,6 +74,29 @@ class VisualValidationProcessor:
             first_patch = marker_patches[0]
             print(f"First marker patch Y range: {first_patch.y_range}")
             print(f"Technical row position check: {abs(first_patch.y_range[0] - tech_row_y) < 10}")
+        
+        # Проверка якорных маркеров
+        anchor_start_valid = self._check_anchor_pattern(frame, marker_patches[0:2], is_start=True)
+        anchor_end_valid = self._check_anchor_pattern(frame, marker_patches[-2:], is_start=False)
+        
+        if not anchor_start_valid or not anchor_end_valid:
+            diagnostics["error"] = {
+                "type": "anchor",
+                "message": f"Invalid anchor markers. Start anchor valid: {anchor_start_valid}, End anchor valid: {anchor_end_valid}"
+            }
+            diagnostics["anchor_check"] = False
+            
+            # Сохраняем отладочное изображение
+            if self.debug_mode and self.marker_debug_dir:
+                self._save_marker_debug_image(
+                    frame, marker_patches, "", "", 
+                    "", diagnostics,
+                    self.marker_debug_dir / f"marker_invalid_anchors.png"
+                )
+            
+            return -1, diagnostics
+        
+        diagnostics["anchor_check"] = True
         
         # Извлекаем все патчи идентификатора и контрольной суммы
         id_patches = []
@@ -105,6 +129,14 @@ class VisualValidationProcessor:
                 "mean": mean_value,
                 "bit": bit
             })
+        
+        # Проверка на полностью черный шаблон (все нули)
+        if binary_str == "0" * len(binary_str) or binary_str == "000000000000":
+            diagnostics["error"] = {
+                "type": "all_zeros",
+                "message": "Pattern is all zeros (completely black). This might be a lead-in frame or indicate improper detection."
+            }
+            return -1, diagnostics
         
         # Считываем биты контрольной суммы
         checksum_binary = ""
@@ -175,7 +207,88 @@ class VisualValidationProcessor:
             }
             
             return -1, diagnostics
-    
+
+    def _check_anchor_pattern(self, frame: Dict[str, np.ndarray], anchor_patches: List[Any], is_start: bool) -> bool:
+        """
+        Проверяет якорные маркеры на соответствие ожидаемому шаблону.
+        
+        Args:
+            frame: Буфер кадра
+            anchor_patches: Список якорных патчей (2 штуки)
+            is_start: True для начальных якорей, False для конечных
+        
+        Returns:
+            bool: True если якорные маркеры валидны
+        """
+        if len(anchor_patches) != 2:
+            print(f"Неверное количество якорных патчей: {len(anchor_patches)}")
+            return False
+        
+        # Извлекаем Y-значения из якорных патчей
+        anchor_values = []
+        
+        for patch in anchor_patches:
+            y_values = frame['Y'][patch.y_range[0]:patch.y_range[1], 
+                            patch.x_range[0]:patch.x_range[1]]
+            
+            # Делим патч на 4 квадранта
+            h, w = y_values.shape
+            half_h, half_w = h // 2, w // 2
+            
+            quadrants = [
+                y_values[:half_h, :half_w],       # верхний левый
+                y_values[:half_h, half_w:],       # верхний правый
+                y_values[half_h:, :half_w],       # нижний левый
+                y_values[half_h:, half_w:]        # нижний правый
+            ]
+            
+            quadrant_means = [np.mean(q) for q in quadrants]
+            anchor_values.append(quadrant_means)
+        
+        # Проверка паттерна якорей
+        # Начальная метка: 1-й патч (ЧБ/БЧ), 2-й патч (БЧ/ЧБ)
+        # Конечная метка: 1-й патч (БЧ/ЧБ), 2-й патч (ЧБ/БЧ)
+        
+        # Пороговое значение для определения черного и белого
+        threshold = (Y_BLACK + Y_WHITE) / 2
+        
+        # Проверка контраста квадрантов
+        valid = True
+        
+        for i, values in enumerate(anchor_values):
+            # Для начальных якорей
+            if is_start:
+                if i == 0:  # Первый патч должен быть ЧБ/БЧ
+                    valid = valid and (values[0] < threshold and values[3] < threshold)  # ЧЧ
+                    valid = valid and (values[1] > threshold and values[2] > threshold)  # ББ
+                else:  # Второй патч должен быть БЧ/ЧБ
+                    valid = valid and (values[0] > threshold and values[3] > threshold)  # ББ
+                    valid = valid and (values[1] < threshold and values[2] < threshold)  # ЧЧ
+            else:  # Для конечных якорей (инверсия)
+                if i == 0:  # Первый патч должен быть БЧ/ЧБ
+                    valid = valid and (values[0] > threshold and values[3] > threshold)  # ББ
+                    valid = valid and (values[1] < threshold and values[2] < threshold)  # ЧЧ
+                else:  # Второй патч должен быть ЧБ/БЧ
+                    valid = valid and (values[0] < threshold and values[3] < threshold)  # ЧЧ
+                    valid = valid and (values[1] > threshold and values[2] > threshold)  # ББ
+        
+        # Проверка контраста между квадрантами (должна быть существенная разница)
+        min_contrast = 20  # Минимальная разница между черным и белым значениями
+        
+        for values in anchor_values:
+            black_values = [values[0], values[3]] if values[0] < threshold else [values[1], values[2]]
+            white_values = [values[1], values[2]] if values[0] < threshold else [values[0], values[3]]
+            
+            avg_black = sum(black_values) / len(black_values)
+            avg_white = sum(white_values) / len(white_values)
+            
+            valid = valid and (avg_white - avg_black > min_contrast)
+        
+        if not valid and self.debug_mode:
+            print(f"Якорные маркеры не прошли проверку: {anchor_values}")
+        
+        return valid
+        
     def _save_marker_debug_image(
         self, 
         frame: Dict[str, np.ndarray], 
@@ -517,6 +630,10 @@ class VisualValidationProcessor:
         # Сохраняем визуализацию
         cv2.imwrite(str(output_path), viz_img)
     
+    """
+    Модификация метода visual_validate для добавления сдвига индексов на 1
+    """
+
     def visual_validate(
         self, 
         video_processor,
@@ -589,9 +706,10 @@ class VisualValidationProcessor:
             for _ in range(intro_frames_count):
                 _ = video_processor.read_y4m_frame(f, width, height)
             
-            # Проходим по всем паттернам
+            # ИЗМЕНЕНИЕ: Используем диапазон с 1 до patterns_count+1 вместо 0 до patterns_count
+            print(f"Validating patterns with indices from 1 to {pattern_generator.patterns_count}")
             with tqdm(total=pattern_generator.patterns_count, desc="Визуальная валидация") as pbar:
-                for pattern_idx in range(pattern_generator.patterns_count):
+                for pattern_idx in range(1, pattern_generator.patterns_count + 1):  # Начинаем с 1, а не с 0
                     # Получаем метаданные паттерна
                     pattern_metadata = self.metadata_handler.load_pattern_metadata(pattern_idx)
                     if not pattern_metadata:
@@ -681,9 +799,9 @@ class VisualValidationProcessor:
             validation_success = (validation_stats["valid_frames"] / total_expected_frames) >= (1 - max_miss_percent)
             
             print(f"Визуальная валидация завершена: "
-                 f"проверено {validation_stats['total_frames']} кадров, "
-                 f"валидных {validation_stats['valid_frames']}, "
-                 f"недействительных {validation_stats['invalid_frames']}")
+                    f"проверено {validation_stats['total_frames']} кадров, "
+                    f"валидных {validation_stats['valid_frames']}, "
+                    f"недействительных {validation_stats['invalid_frames']}")
             
             # Сохраняем результаты валидации
             if self.debug_mode and self.debug_dir:

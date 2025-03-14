@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict
+from datetime import datetime
 
 
 # Определяем энкодер numpy типов один раз
@@ -63,6 +64,26 @@ class PatternMetadataHandler:
         """
         # Сохраняем в буфер
         self.metadata_buffer[pattern_idx] = metadata
+    
+    def save_config_metadata(self, config: Dict[str, Any]) -> None:
+        """
+        Сохраняет конфигурацию генератора паттернов в метаданные.
+        
+        Args:
+            config: Словарь с параметрами конфигурации
+        """
+        # Создаем запись конфигурации с индексом -1 (специальный индекс для конфигурации)
+        config_metadata = {
+            "type": "config",
+            "content_type": "config",
+            "pattern_idx": -1,  # Используем -1 как специальный индекс для конфигурации
+            "config": config
+        }
+        
+        # Сохраняем в буфер
+        self.metadata_buffer[-1] = config_metadata
+        
+        print(f"Конфигурация добавлена в метаданные")
     
     def flush_metadata(self) -> None:
         """Сохраняет все метаданные из буфера в файл."""

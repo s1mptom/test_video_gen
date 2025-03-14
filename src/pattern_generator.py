@@ -2,7 +2,7 @@
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 from .utils.constants import (
     Y_BLACK, Y_WHITE, UV_NEUTRAL, MARKER_PATCHES,
@@ -227,7 +227,7 @@ class PatternGenerator:
                 color_idx += 1
         
         # Добавляем маркер паттерна в техническую строку
-        self._add_pattern_marker(frame, pattern_index)
+        self._add_pattern_marker(frame, pattern_index + 1)
         
         # Добавляем калибровочные цвета в оставшуюся часть технической строки
         self._add_calibration_colors(frame)
@@ -469,13 +469,15 @@ class PatternGenerator:
                 frame['U'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
                 frame['V'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
                 
-    def save_pattern_metadata(self, pattern_index: int, metadata_handler) -> None:
+    def generate_pattern_metadata(self, pattern_index: int) -> Dict[str, Any]:
         """
-        Сохраняет метаданные о паттерне для последующей валидации.
+        Генерирует метаданные паттерна без сохранения.
         
         Args:
             pattern_index: Индекс паттерна
-            metadata_handler: Обработчик метаданных
+            
+        Returns:
+            Dict[str, Any]: Метаданные паттерна
         """
         # Определяем какие цвета используются для этого паттерна
         start_idx = pattern_index * self.available_patches
@@ -533,9 +535,24 @@ class PatternGenerator:
                     patch_data["y_value"] = y_values_list[color_idx]
                     patch_data["u_value"] = u_values_list[color_idx]
                     patch_data["v_value"] = v_values_list[color_idx]
+                    # Добавляем индекс цвета для лучшего сопоставления
+                    patch_data["color_idx"] = color_idx
                 
                 metadata["patches"].append(patch_data)
                 color_idx += 1
         
-        # Вызываем новый метод сохранения метаданных
-        metadata_handler.save_pattern_metadata(pattern_index, metadata)
+        return metadata
+
+    def save_pattern_metadata(self, pattern_idx: int, metadata_handler) -> None:
+        """
+        Сохраняет метаданные паттерна для последующей валидации.
+        
+        Args:
+            pattern_idx: Индекс паттерна
+            metadata_handler: Обработчик метаданных
+        """
+        # Генерируем метаданные
+        metadata = self.generate_pattern_metadata(pattern_idx)
+        
+        # Вызываем метод сохранения метаданных
+        metadata_handler.save_pattern_metadata(pattern_idx, metadata)

@@ -43,13 +43,13 @@ class VisualValidationProcessor:
         
         self.metadata_handler = PatternMetadataHandler(output_dir)
     
-    def read_pattern_marker(self, frame: Dict[str, np.ndarray], marker_patches: List[Any]) -> Tuple[int, Dict[str, Any]]:
+    def read_pattern_marker(self, frame: Dict[str, np.ndarray], pattern_generator) -> Tuple[int, Dict[str, Any]]:
         """
         Считывает маркер паттерна из технической строки с исправленным алгоритмом.
         
         Args:
             frame: Буфер кадра
-            marker_patches: Список индексов маркерных патчей
+            pattern_generator: Генератор паттернов с информацией о маркерах
             
         Returns:
             Tuple[int, Dict[str, Any]]: Считанный номер паттерна (-1 в случае ошибки) и диагностика
@@ -61,23 +61,35 @@ class VisualValidationProcessor:
             "threshold": 0
         }
         
+        # Получаем правильные маркерные патчи из технической строки
+        marker_patches = []
+        for marker_idx in pattern_generator.marker_indices:
+            marker_patches.append(pattern_generator.patch_coords[marker_idx])
+        
+        # Проверяем, что маркеры находятся в правильном месте (в технической строке)
+        tech_row_y = pattern_generator.tech_row * (pattern_generator.patch_size + pattern_generator.patch_gap)
+        if self.debug_mode:
+            print(f"Technical row should start at Y: {tech_row_y}")
+            first_patch = marker_patches[0]
+            print(f"First marker patch Y range: {first_patch.y_range}")
+            print(f"Technical row position check: {abs(first_patch.y_range[0] - tech_row_y) < 10}")
+        
         # Извлекаем все патчи идентификатора и контрольной суммы
         id_patches = []
         for i in range(2, 14):  # Патчи идентификатора (2-13)
-            patch_idx = marker_patches[i]
-            y_values = frame['Y'][patch_idx.y_range[0]:patch_idx.y_range[1], 
-                             patch_idx.x_range[0]:patch_idx.x_range[1]]
+            patch = marker_patches[i - 0]  # -0 поскольку marker_patches уже содержит только маркерные патчи
+            y_values = frame['Y'][patch.y_range[0]:patch.y_range[1], 
+                            patch.x_range[0]:patch.x_range[1]]
             id_patches.append(y_values)
         
         checksum_patches = []
         for i in range(14, 18):  # Патчи контрольной суммы (14-17)
-            patch_idx = marker_patches[i]
-            y_values = frame['Y'][patch_idx.y_range[0]:patch_idx.y_range[1], 
-                             patch_idx.x_range[0]:patch_idx.x_range[1]]
+            patch = marker_patches[i - 0]  # -0 поскольку marker_patches уже содержит только маркерные патчи
+            y_values = frame['Y'][patch.y_range[0]:patch.y_range[1], 
+                            patch.x_range[0]:patch.x_range[1]]
             checksum_patches.append(y_values)
         
         # Используем фиксированный порог, основанный на известных значениях Y_BLACK и Y_WHITE
-        # Вместо того, чтобы вычислять его динамически
         threshold = (Y_BLACK + Y_WHITE) / 2
         diagnostics["threshold"] = float(threshold)
         
@@ -213,10 +225,11 @@ class VisualValidationProcessor:
         # Рисуем информацию о маркерных патчах
         # Патчи идентификатора
         for i in range(2, 14):
-            patch_idx = marker_patches[i]
+            patch_idx = i - 0  # Смещение -0, так как marker_patches уже содержит только маркерные патчи
+            patch = marker_patches[patch_idx]
             
             # Координаты патча
-            x1, x2 = patch_idx.x_range
+            x1, x2 = patch.x_range
             
             # Бит и его значение
             bit_info = next((b for b in diagnostics["pattern_bits"] if b["index"] == i), None)
@@ -242,10 +255,11 @@ class VisualValidationProcessor:
         
         # Патчи контрольной суммы
         for i in range(14, 18):
-            patch_idx = marker_patches[i]
+            patch_idx = i - 0  # Смещение -0, так как marker_patches уже содержит только маркерные патчи
+            patch = marker_patches[patch_idx]
             
             # Координаты патча
-            x1, x2 = patch_idx.x_range
+            x1, x2 = patch.x_range
             
             # Бит и его значение
             bit_info = next((b for b in diagnostics["checksum_bits"] if b["index"] == i), None)
@@ -557,6 +571,20 @@ class VisualValidationProcessor:
             width = int(width_match.group(1))
             height = int(height_match.group(1))
             
+            # Проверяем настройки маркеров для отладки
+            if self.debug_mode:
+                technical_row_y = pattern_generator.tech_row * (pattern_generator.patch_size + pattern_generator.patch_gap)
+                print(f"Technical row should start at Y: {technical_row_y}")
+                print(f"Total frame height: {height}")
+                print(f"Marker indices count: {len(pattern_generator.marker_indices)}")
+                
+                # Верификация маркерных координат
+                if pattern_generator.marker_indices:
+                    first_marker = pattern_generator.patch_coords[pattern_generator.marker_indices[0]]
+                    print(f"First marker patch coordinates: {first_marker.y_range}")
+                    if first_marker.y_range[0] != technical_row_y:
+                        print(f"WARNING: Marker position mismatch! Expected Y={technical_row_y}, got Y={first_marker.y_range[0]}")
+                        
             # Пропускаем кадры вводной последовательности
             for _ in range(intro_frames_count):
                 _ = video_processor.read_y4m_frame(f, width, height)
@@ -590,8 +618,7 @@ class VisualValidationProcessor:
                         # Для первого кадра каждого паттерна выполняем проверку
                         if frame_idx == 0:
                             # Считываем маркер паттерна
-                            detected_pattern_idx, marker_diagnostics = self.read_pattern_marker(
-                                frame, pattern_generator.patch_coords)
+                            detected_pattern_idx, marker_diagnostics = self.read_pattern_marker(frame, pattern_generator)
                             
                             if detected_pattern_idx == -1:
                                 print(f"Ошибка чтения маркера в кадре (ожидаемый паттерн {pattern_idx})")

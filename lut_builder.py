@@ -466,42 +466,47 @@ class LutBuilder:
             print(f"Error estimating patch size: {e}")
             return -1
     
-    def _nv12_to_planar_yuv(self, y_data: np.ndarray, uv_data: np.ndarray, width: int, height: int) -> Dict[str, np.ndarray]:
+    def _nv12_to_planar_yuv(self, y_data: np.ndarray, uv_data: np.ndarray, width: int, height: int, format: str = "422") -> Dict[str, np.ndarray]:
         """
-        Convert NV12 semi-planar format to planar YUV.
+        Преобразует NV12 полуплоский формат в планарный YUV.
         
         Args:
-            y_data: Y plane data
-            uv_data: UV plane data
-            width: Frame width
-            height: Frame height
+            y_data: Данные Y-плоскости
+            uv_data: Данные UV-плоскости
+            width: Ширина кадра
+            height: Высота кадра
+            format: Целевой формат YUV ("420" или "422")
             
         Returns:
-            Dict[str, np.ndarray]: Dictionary with 'Y', 'U', 'V' planes
+            Dict[str, np.ndarray]: Словарь с плоскостями 'Y', 'U', 'V'
         """
-        # Check if the data shapes match what we expect for NV12
-        if len(y_data) != width * height:
-            print(f"Warning: Y data size {len(y_data)} doesn't match expected size {width * height}")
-            
-        expected_uv_size = width * height // 2
-        if len(uv_data) != expected_uv_size:
-            print(f"Warning: UV data size {len(uv_data)} doesn't match expected size {expected_uv_size}")
-        
-        # Reshape Y data
+        # Формируем Y-плоскость
         y_plane = y_data.reshape((height, width))
         
-        # Process UV data (NV12 has interleaved U and V)
-        uv_height = height // 2
-        uv_width = width // 2
-        
-        # Deinterleave UV data (NV12 format has UV pairs)
-        uv_data = uv_data.reshape((uv_height, width))
-        u_plane = np.zeros((uv_height, uv_width), dtype=np.uint8)
-        v_plane = np.zeros((uv_height, uv_width), dtype=np.uint8)
-        
-        # Extract U (even columns) and V (odd columns)
-        u_plane = uv_data[:, 0::2]
-        v_plane = uv_data[:, 1::2]
+        # Обрабатываем UV-данные (в NV12 чередуются U и V)
+        if format == "420":
+            # Стандартное преобразование для YUV420
+            uv_height = height // 2
+            uv_width = width // 2
+            
+            uv_data = uv_data.reshape((uv_height, width))
+            u_plane = uv_data[:, 0::2]
+            v_plane = uv_data[:, 1::2]
+        elif format == "422":
+            # Преобразование в YUV422 с интерполяцией по вертикали
+            uv_height = height // 2
+            uv_width = width // 2
+            
+            # Сначала получаем U и V в формате 420
+            uv_data_reshaped = uv_data.reshape((uv_height, width))
+            u_plane_420 = uv_data_reshaped[:, 0::2]
+            v_plane_420 = uv_data_reshaped[:, 1::2]
+            
+            # Затем масштабируем до 422 (полное разрешение по вертикали)
+            u_plane = cv2.resize(u_plane_420, (uv_width, height), interpolation=cv2.INTER_LINEAR)
+            v_plane = cv2.resize(v_plane_420, (uv_width, height), interpolation=cv2.INTER_LINEAR)
+        else:
+            raise ValueError(f"Неподдерживаемый формат YUV: {format}")
         
         return {'Y': y_plane, 'U': u_plane, 'V': v_plane}
     
@@ -524,18 +529,23 @@ class LutBuilder:
         self, 
         extracted_values: List[Tuple[float, float, float]], 
         patches_metadata: List[Dict[str, Any]],
-        colors: List[List[int]]
+        colors: List[List[int]],
+        format: str = "422"  # Добавить параметр формата
     ) -> None:
         """
-        Update LUT based on extracted YUV values and original RGB colors.
+        Обновляет LUT на основе извлеченных значений YUV и оригинальных RGB цветов.
         
         Args:
-            extracted_values: List of extracted (Y, U, V) values
-            patches_metadata: List of patch metadata
-            colors: List of original RGB colors for the pattern
+            extracted_values: Список извлеченных значений (Y, U, V)
+            patches_metadata: Список метаданных патчей
+            colors: Список оригинальных RGB цветов для паттерна
+            format: Формат YUV ("420" или "422")
         """
         updates_count = 0
         skipped_count = 0
+        
+        # Создаем карту уверенности для этого обновления
+        confidence_map = {}
         
         for i, (y_val, u_val, v_val) in enumerate(extracted_values):
             if i >= len(patches_metadata):
@@ -544,48 +554,56 @@ class LutBuilder:
             # Проверяем на NaN или недопустимые значения
             if np.isnan(y_val) or np.isnan(u_val) or np.isnan(v_val):
                 skipped_count += 1
-                if skipped_count < 5 or skipped_count % 50 == 0:
-                    print(f"Skipping NaN YUV values for patch {i}: ({y_val}, {u_val}, {v_val})")
                 continue
                 
             patch = patches_metadata[i]
             
-            # Get original RGB color from colors list based on index
-            # If patch has a color_idx field, use that to index into colors
-            # Otherwise, use the sequential index
-            if "color_idx" in patch and patch["color_idx"] < len(colors):
-                color_idx = patch["color_idx"]
+            # Извлекаем оригинальный RGB цвет
+            color_idx = patch.get("color_idx", i)
+            if color_idx < len(colors):
                 r, g, b = colors[color_idx]
-            elif i < len(colors):
-                r, g, b = colors[i]
             else:
                 continue
             
             try:
-                # Convert float YUV to int indices for LUT
+                # Преобразуем извлеченные YUV в индексы LUT
                 y_idx = int(round(y_val))
                 u_idx = int(round(u_val))
                 v_idx = int(round(v_val))
                 
-                # Ensure indices are within valid range
+                # Ограничиваем индексы в допустимом диапазоне
                 y_idx = max(0, min(y_idx, 255))
                 u_idx = max(0, min(u_idx, 255))
                 v_idx = max(0, min(v_idx, 255))
                 
-                # For debug output
-                if updates_count < 5 or updates_count % 50 == 0:
-                    print(f"Mapping YUV({y_idx}, {u_idx}, {v_idx}) → RGB({r}, {g}, {b})")
+                # Рассчитываем уверенность для этого образца
+                # В 422 формате у нас больше данных о цвете по вертикали
+                # Поэтому можем повысить уверенность
+                confidence_boost = 1.2 if format == "422" else 1.0
                 
-                # Update LUT entry
-                self.update_lut_entry(y_idx, u_idx, v_idx, r, g, b)
+                # Оцениваем качество патча
+                quality = self._assess_patch_quality(patch, y_val, u_val, v_val)
+                confidence = quality * confidence_boost
+                
+                # Сохраняем уровень уверенности
+                lut_key = (y_idx, u_idx, v_idx)
+                confidence_map[lut_key] = confidence
+                
+                # Обновляем запись в LUT с учетом уверенности
+                self._update_lut_entry_with_confidence(y_idx, u_idx, v_idx, r, g, b, confidence)
                 updates_count += 1
+                
             except (ValueError, TypeError, OverflowError) as e:
                 skipped_count += 1
                 if skipped_count < 5:
-                    print(f"Error processing YUV values ({y_val}, {u_val}, {v_val}): {e}")
+                    print(f"Ошибка обработки значений YUV ({y_val}, {u_val}, {v_val}): {e}")
         
-        print(f"Updated {updates_count} entries in the LUT, skipped {skipped_count} invalid values")
-    
+        print(f"Обновлено {updates_count} записей в LUT, пропущено {skipped_count} недопустимых значений")
+        
+        # Проводим дополнительный анализ непрерывности для улучшения LUT
+        if updates_count > 0:
+            self._analyze_and_smooth_lut(confidence_map)
+            
     def update_lut_entry(self, y: int, u: int, v: int, r: int, g: int, b: int) -> None:
         """
         Update a specific entry in the LUT.
@@ -704,3 +722,45 @@ class LutBuilder:
             cv2.imwrite(str(self.debug_dir / f"{name}.png"), rgb.astype(np.uint8))
         except Exception as e:
             print(f"Error saving debug frame: {e}")
+
+    def _assess_patch_quality(self, patch, y_val, u_val, v_val):
+        """
+        Оценивает качество патча для взвешивания при обновлении LUT.
+        
+        Args:
+            patch: Метаданные патча
+            y_val, u_val, v_val: Извлеченные значения YUV
+            
+        Returns:
+            float: Оценка качества от 0.0 до 1.0
+        """
+        # Факторы качества:
+        
+        # 1. Центральность значений YUV (избегаем крайних значений)
+        y_center = 1.0 - abs(y_val - 128.0) / 128.0
+        u_center = 1.0 - abs(u_val - 128.0) / 128.0
+        v_center = 1.0 - abs(v_val - 128.0) / 128.0
+        centrality = (y_center + u_center + v_center) / 3.0
+        
+        # 2. Размер патча (больше = лучше)
+        y_range = patch["y_range"]
+        x_range = patch["x_range"]
+        patch_size = min(y_range[1] - y_range[0], x_range[1] - x_range[0])
+        size_quality = min(1.0, patch_size / 16.0)  # Нормализуем по размеру патча 16x16
+        
+        # 3. Положение в кадре (избегаем краев)
+        frame_height = 1080  # Предполагаемая высота кадра
+        frame_width = 1920   # Предполагаемая ширина кадра
+        
+        center_y = (y_range[0] + y_range[1]) / 2.0
+        center_x = (x_range[0] + x_range[1]) / 2.0
+        
+        distance_from_center_y = abs(center_y - frame_height/2) / (frame_height/2)
+        distance_from_center_x = abs(center_x - frame_width/2) / (frame_width/2)
+        position_quality = 1.0 - max(distance_from_center_y, distance_from_center_x)
+        
+        # Итоговая оценка качества (взвешенная сумма)
+        quality = 0.4 * centrality + 0.4 * size_quality + 0.2 * position_quality
+        
+        # Ограничиваем в диапазоне [0.1, 1.0]
+        return max(0.1, min(1.0, quality))

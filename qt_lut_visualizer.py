@@ -71,38 +71,33 @@ def parse_args():
 if NUMBA_AVAILABLE:
     @jit(nopython=True, parallel=True)
     def apply_lut_numba(y_plane, u_resized, v_resized, lut_data, height, width):
-        """
-        Apply LUT using Numba acceleration.
-        
-        Args:
-            y_plane: Y plane data
-            u_resized: Resized U plane data
-            v_resized: Resized V plane data
-            lut_data: The LUT data array
-            height, width: Image dimensions
-            
-        Returns:
-            np.ndarray: RGB image with LUT applied
-        """
         result = np.zeros((height, width, 3), dtype=np.uint8)
         
-        # Process in parallel for better performance
         for y in prange(height):
             for x in range(width):
-                # Get YUV values
+                # Получаем YUV значения
                 y_val = y_plane[y, x]
                 u_val = u_resized[y, x]
                 v_val = v_resized[y, x]
                 
-                # Calculate LUT index - LUT data is in RGB order but we need BGR for OpenCV
-                idx = (y_val + (u_val << 8) + (v_val << 16)) * 3
+                # Преобразуем из ограниченного в полный диапазон
+                y_fullrange = int(((y_val - 16) * 255) / 219) if y_val >= 16 else 0
+                u_fullrange = int(((u_val - 16) * 255) / 224) if u_val >= 16 else 0
+                v_fullrange = int(((v_val - 16) * 255) / 224) if v_val >= 16 else 0
                 
-                # Check bounds
+                # Ограничиваем значения
+                y_fullrange = max(0, min(255, y_fullrange))
+                u_fullrange = max(0, min(255, u_fullrange))
+                v_fullrange = max(0, min(255, v_fullrange))
+                
+                # Рассчитываем индекс
+                idx = (y_fullrange + (u_fullrange << 8) + (v_fullrange << 16)) * 3
+                
+                # Проверка границ
                 if idx < len(lut_data) - 2:
-                    # LUT data is in RGB order, but we need BGR for OpenCV
-                    result[y, x, 0] = lut_data[idx+2]  # B from R
-                    result[y, x, 1] = lut_data[idx+1]  # G from G
-                    result[y, x, 2] = lut_data[idx]    # R from B
+                    result[y, x, 0] = lut_data[idx+2]
+                    result[y, x, 1] = lut_data[idx+1]
+                    result[y, x, 2] = lut_data[idx]
         
         return result
 

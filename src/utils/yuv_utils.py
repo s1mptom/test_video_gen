@@ -36,11 +36,7 @@ def create_uv_plane(height: int, width: int, value: int = UV_NEUTRAL) -> np.ndar
     return np.full((height, width), value, dtype=np.uint8)
 
 
-def create_yuv_buffer(
-    height: int, 
-    width: int, 
-    chroma_subsampling: str = "420"
-) -> Dict[str, np.ndarray]:
+def create_yuv_buffer(height: int, width: int, chroma_subsampling: str = "422"):
     """
     Создает буфер кадра в формате YUV с нейтрально-серым фоном.
     

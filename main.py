@@ -31,13 +31,13 @@ def parse_args() -> argparse.Namespace:
     )
     
     # Основные параметры
-    parser.add_argument("--width", type=int, default=1280, help="Ширина видео (пикс)")
-    parser.add_argument("--height", type=int, default=720, help="Высота видео (пикс)")
+    parser.add_argument("--width", type=int, default=1920, help="Ширина видео (пикс)")
+    parser.add_argument("--height", type=int, default=1080, help="Высота видео (пикс)")
     parser.add_argument("--patch-size", type=int, default=16, help="Размер цветового патча (пикс)")
     parser.add_argument("--patch-gap", type=int, default=4, help="Промежуток между патчами (пикс)")
     
     # Параметры цветов и видео
-    parser.add_argument("--color-range", type=float, default=20.0,
+    parser.add_argument("--color-range", type=float, default=50.0,
                       help="Процент цветового диапазона [0-100]")
     parser.add_argument("--bit-depth", type=int, default=8, help="Глубина цвета (бит)")
     parser.add_argument("--fps", type=int, default=30, help="Частота кадров")

@@ -428,13 +428,9 @@ class VisualValidationProcessor:
         # Сохраняем изображение
         cv2.imwrite(str(output_path), final_img)
     
-    def extract_patch_values(
-        self, 
-        frame: Dict[str, np.ndarray], 
-        patches_metadata: List[Dict[str, Any]]
-    ) -> List[Tuple[float, float, float]]:
+    def extract_patch_values_422(self, frame: Dict[str, np.ndarray], patches_metadata: List[Dict[str, Any]]) -> List[Tuple[float, float, float]]:
         """
-        Извлекает средние значения YUV из патчей кадра.
+        Извлекает средние значения YUV из патчей с учётом формата 422.
         
         Args:
             frame: Буфер кадра
@@ -451,37 +447,56 @@ class VisualValidationProcessor:
             y_uv_range = tuple(patch["y_uv_range"])
             x_uv_range = tuple(patch["x_uv_range"])
             
-            # Игнорируем крайние пиксели, чтобы уменьшить влияние краевых эффектов
-            border = 1
+            # Игнорируем крайние пиксели для более точного измерения
+            border = 2
             y_min, y_max = y_range
             x_min, x_max = x_range
             
-            # Проверяем, достаточно ли большой патч для отступа
+            # Проверяем размер патча
             if y_max - y_min > 2*border and x_max - x_min > 2*border:
                 y_min += border
                 y_max -= border
                 x_min += border
                 x_max -= border
             
-            # Аналогично для UV
+            # Для YUV422 нужно корректировать только X-координаты для UV
             y_uv_min, y_uv_max = y_uv_range
             x_uv_min, x_uv_max = x_uv_range
             
-            if y_uv_max - y_uv_min > 2 and x_uv_max - x_uv_min > 2:
-                y_uv_min += 1
-                y_uv_max -= 1
+            if x_uv_max - x_uv_min > 2:
                 x_uv_min += 1
                 x_uv_max -= 1
             
-            # Извлекаем значения из центральной части патча
+            # Извлекаем патчи
             y_patch = frame['Y'][y_min:y_max, x_min:x_max]
             u_patch = frame['U'][y_uv_min:y_uv_max, x_uv_min:x_uv_max]
             v_patch = frame['V'][y_uv_min:y_uv_max, x_uv_min:x_uv_max]
             
-            # Вычисляем средние значения
-            y_mean = float(np.mean(y_patch))
-            u_mean = float(np.mean(u_patch))
-            v_mean = float(np.mean(v_patch))
+            # Создаем гауссово ядро для взвешенного усреднения
+            h, w = y_patch.shape
+            y_grid, x_grid = np.mgrid[0:h, 0:w]
+            center_y, center_x = h//2, w//2
+            sigma = max(h, w) / 5.0
+            
+            weights = np.exp(-((x_grid - center_x)**2 + (y_grid - center_y)**2) / (2*sigma**2))
+            weights /= weights.sum()
+            
+            # Взвешенное среднее для Y
+            y_mean = float(np.sum(y_patch * weights))
+            
+            # Адаптируем веса для UV (в 422 нужно изменить только по ширине)
+            h_uv, w_uv = u_patch.shape
+            if h_uv != h:
+                weights_uv = cv2.resize(weights, (w_uv, h_uv))
+            else:
+                # В случае 422 высота такая же, нужно изменить только ширину
+                weights_uv = weights[:, ::2] if w_uv*2 == w else cv2.resize(weights, (w_uv, h_uv))
+            
+            weights_uv /= weights_uv.sum()
+            
+            # Взвешенное среднее для U и V
+            u_mean = float(np.sum(u_patch * weights_uv))
+            v_mean = float(np.sum(v_patch * weights_uv))
             
             patch_values.append((y_mean, u_mean, v_mean))
         

@@ -25,7 +25,7 @@ class VideoProcessor:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
-    def write_y4m_header(self, file: BinaryIO, width: int, height: int, fps: int, colorspace: str = "420") -> None:
+    def write_y4m_header(self, file: BinaryIO, width: int, height: int, fps: int, colorspace: str = "422"):
         """
         Записывает заголовок Y4M файла.
         
@@ -37,8 +37,8 @@ class VideoProcessor:
             colorspace: Цветовое пространство
         """
         header = f"YUV4MPEG2 W{width} H{height} F{fps}:1 Ip A1:1 C{colorspace}\n"
-        file.write(header.encode('ascii'))
-    
+        file.write(header.encode('ascii'))    
+
     def write_y4m_frame(self, file: BinaryIO, frame: Dict[str, np.ndarray]) -> None:
         """
         Записывает кадр в Y4M файл.
@@ -364,7 +364,7 @@ class VideoProcessor:
         
         return validation_y4m
     
-    def read_y4m_frame(self, file: BinaryIO, width: int, height: int) -> Optional[Dict[str, np.ndarray]]:
+    def read_y4m_frame(self, file: BinaryIO, width: int, height: int, format: str = "422") -> Optional[Dict[str, np.ndarray]]:
         """
         Читает один кадр из Y4M файла.
         
@@ -372,6 +372,7 @@ class VideoProcessor:
             file: Файловый объект для чтения
             width: Ширина кадра
             height: Высота кадра
+            format: Формат YUV ("420" или "422")
             
         Returns:
             Optional[Dict[str, np.ndarray]]: Буфер кадра с Y, U и V плоскостями или None
@@ -381,28 +382,35 @@ class VideoProcessor:
         if not frame_header.startswith(b"FRAME"):
             return None
         
-        # Размеры для YUV 4:2:0
+        # Размеры Y-плоскости всегда одинаковы
         y_size = width * height
-        uv_size = (width // 2) * (height // 2)
         
-        # Читаем Y-плоскость
+        # Размеры UV зависят от формата
+        if format == "420":
+            uv_height, uv_width = height // 2, width // 2
+        elif format == "422":
+            uv_height, uv_width = height, width // 2
+        else:
+            raise ValueError(f"Неподдерживаемый формат YUV: {format}")
+        
+        uv_size = uv_width * uv_height
+        
+        # Читаем данные
         y_data = file.read(y_size)
         if len(y_data) != y_size:
             return None
         
-        # Читаем U-плоскость
         u_data = file.read(uv_size)
         if len(u_data) != uv_size:
             return None
         
-        # Читаем V-плоскость
         v_data = file.read(uv_size)
         if len(v_data) != uv_size:
             return None
         
         # Преобразуем в numpy массивы
         y_plane = np.frombuffer(y_data, dtype=np.uint8).reshape(height, width)
-        u_plane = np.frombuffer(u_data, dtype=np.uint8).reshape(height // 2, width // 2)
-        v_plane = np.frombuffer(v_data, dtype=np.uint8).reshape(height // 2, width // 2)
+        u_plane = np.frombuffer(u_data, dtype=np.uint8).reshape(uv_height, uv_width)
+        v_plane = np.frombuffer(v_data, dtype=np.uint8).reshape(uv_height, uv_width)
         
         return {'Y': y_plane, 'U': u_plane, 'V': v_plane}

@@ -33,7 +33,7 @@ class PatternGenerator:
         patch_gap: int, 
         color_range_percent: float,
         bit_depth: int = 8,
-        chroma_subsampling: str = "420"
+        chroma_subsampling: str = "422"  # Изменим дефолтное значение на 422
     ):
         """
         Инициализирует генератор цветовых паттернов.
@@ -104,8 +104,12 @@ class PatternGenerator:
             y1 = patch_y * (self.patch_size + self.patch_gap)
             
             x1_uv = x1 // 2
-            y1_uv = y1 // 2
-            patch_size_uv = self.patch_size // 2
+            # В 422 формате Y-координаты не делятся на 2
+            y1_uv = y1 if self.chroma_subsampling == "422" else y1 // 2
+            
+            patch_size_uv_x = self.patch_size // 2
+            # В 422 формате размер патча по вертикали не делится на 2
+            patch_size_uv_y = self.patch_size if self.chroma_subsampling == "422" else self.patch_size // 2
             
             # Определяем, является ли патч техническим
             is_tech = (patch_y == self.tech_row)
@@ -114,8 +118,8 @@ class PatternGenerator:
             self.patch_coords.append(PatchCoordinates(
                 y_range=(y1, y1 + self.patch_size),
                 x_range=(x1, x1 + self.patch_size),
-                y_uv_range=(y1_uv, y1_uv + patch_size_uv),
-                x_uv_range=(x1_uv, x1_uv + patch_size_uv),
+                y_uv_range=(y1_uv, y1_uv + patch_size_uv_y),
+                x_uv_range=(x1_uv, x1_uv + patch_size_uv_x),
                 is_tech=is_tech
             ))
             

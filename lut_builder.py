@@ -505,6 +505,15 @@ class LutBuilder:
             # Затем масштабируем до 422 (полное разрешение по вертикали)
             u_plane = cv2.resize(u_plane_420, (uv_width, height), interpolation=cv2.INTER_LINEAR)
             v_plane = cv2.resize(v_plane_420, (uv_width, height), interpolation=cv2.INTER_LINEAR)
+        elif format == "444":
+            # Преобразование в YUV444 с интерполяцией по вертикали и горизонтали
+            uv_data_reshaped = uv_data.reshape((height // 2, width))
+            u_plane_420 = uv_data_reshaped[:, 0::2]
+            v_plane_420 = uv_data_reshaped[:, 1::2]
+            
+            # Масштабируем до 444 (полное разрешение во всех измерениях)
+            u_plane = cv2.resize(u_plane_420, (width, height), interpolation=cv2.INTER_CUBIC)
+            v_plane = cv2.resize(v_plane_420, (width, height), interpolation=cv2.INTER_CUBIC)
         else:
             raise ValueError(f"Неподдерживаемый формат YUV: {format}")
         

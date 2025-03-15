@@ -390,6 +390,8 @@ class VideoProcessor:
             uv_height, uv_width = height // 2, width // 2
         elif format == "422":
             uv_height, uv_width = height, width // 2
+        elif format == "444":
+            uv_height, uv_width = height, width
         else:
             raise ValueError(f"Неподдерживаемый формат YUV: {format}")
         

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, BinaryIO
 
 from .video_processor import VideoProcessor
+from .utils.constants import ChromaFormat, ColorRange
 
 
 class ValidationProcessor:
@@ -28,7 +29,8 @@ class ValidationProcessor:
         actual: Dict[str, np.ndarray], 
         patches_mask: Dict[str, np.ndarray],
         deviation: int = 4, 
-        max_miss_percent: float = 0.002
+        max_miss_percent: float = 0.002,
+        chroma_format: str = ChromaFormat.YUV_422
     ) -> Tuple[bool, Dict[str, Dict[str, float]]]:
         """
         Проверяет кадр с допустимым отклонением и процентом ошибок.
@@ -39,6 +41,7 @@ class ValidationProcessor:
             patches_mask: Маска патчей (1 - патч, 0 - фон)
             deviation: Максимальное допустимое отклонение значений
             max_miss_percent: Максимальный допустимый процент ошибок
+            chroma_format: Формат цветовой субдискретизации
             
         Returns:
             Tuple[bool, Dict[str, Dict[str, float]]]: 
@@ -54,13 +57,22 @@ class ValidationProcessor:
             
             # Проверяем размеры
             if expected_plane.shape != actual_plane.shape:
-                raise ValueError(f"Размеры не совпадают: ожидалось {expected_plane.shape}, "
-                               f"получено {actual_plane.shape}")
+                # Пытаемся адаптировать маску, если формат изменился
+                if plane in ['U', 'V'] and chroma_format in [ChromaFormat.YUV_420, ChromaFormat.YUV_422]:
+                    # Масштабируем маску, если размеры не совпадают
+                    mask = self._resize_mask(mask, actual_plane.shape)
+                else:
+                    raise ValueError(f"Размеры не совпадают для плоскости {plane}: ожидалось {expected_plane.shape}, "
+                                  f"получено {actual_plane.shape}")
             
             # Расчет отклонения только для пикселей патчей (применяем маску)
             diff = np.abs(actual_plane.astype(int) - expected_plane.astype(int))
             
             # Применяем маску - учитываем только пиксели, где маска == 1
+            if mask.shape != diff.shape:
+                # Масштабируем маску, если размеры не совпадают
+                mask = self._resize_mask(mask, diff.shape)
+                
             masked_diff = diff * mask
             masked_total = np.sum(mask)  # Общее число пикселей в патчах
             
@@ -103,6 +115,21 @@ class ValidationProcessor:
                 return False, results
                 
         return True, results
+    
+    def _resize_mask(self, mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Масштабирует маску до целевого размера.
+        
+        Args:
+            mask: Исходная маска
+            target_shape: Целевой размер
+            
+        Returns:
+            np.ndarray: Масштабированная маска
+        """
+        import cv2
+        return cv2.resize(mask, (target_shape[1], target_shape[0]), 
+                         interpolation=cv2.INTER_NEAREST).astype(mask.dtype)
     
     def _save_debug_images(
         self, 
@@ -147,7 +174,9 @@ class ValidationProcessor:
         patches_mask: Dict[str, np.ndarray], 
         deviation: int = 4, 
         max_miss_percent: float = 0.002,
-        intro_frames_count: int = 0
+        intro_frames_count: int = 0,
+        chroma_format: str = ChromaFormat.YUV_422,
+        color_range: str = ColorRange.LIMITED
     ) -> bool:
         """
         Валидирует декодированное видео.
@@ -163,33 +192,43 @@ class ValidationProcessor:
             deviation: Максимальное допустимое отклонение значений
             max_miss_percent: Максимальный допустимый процент ошибок
             intro_frames_count: Количество вводных кадров для пропуска
+            chroma_format: Формат цветовой субдискретизации
+            color_range: Цветовой диапазон
             
         Returns:
             bool: Результат валидации (True - успешно, False - ошибка)
         """
         from tqdm import tqdm
         
-        # Читаем заголовок Y4M
+        # Читаем заголовок Y4M для определения реальных параметров файла
+        video_processor = VideoProcessor()
+        file_params = video_processor.parse_y4m_header(validation_y4m)
+        
+        # Используем параметры из файла, если они отличаются от переданных
+        actual_chroma_format = file_params.get('chroma_format', chroma_format)
+        actual_color_range = file_params.get('color_range', color_range)
+        actual_width = file_params.get('width', width)
+        actual_height = file_params.get('height', height)
+        
+        if actual_width != width or actual_height != height:
+            print(f"Предупреждение: Размеры в файле ({actual_width}x{actual_height}) "
+                 f"отличаются от ожидаемых ({width}x{height})")
+        
+        if actual_chroma_format != chroma_format:
+            print(f"Предупреждение: Формат в файле ({actual_chroma_format}) "
+                 f"отличается от ожидаемого ({chroma_format})")
+            
+        if actual_color_range != color_range:
+            print(f"Предупреждение: Цветовой диапазон в файле ({actual_color_range}) "
+                 f"отличается от ожидаемого ({color_range})")
+        
         with open(validation_y4m, 'rb') as f:
+            # Пропускаем заголовок Y4M
             header = f.readline().decode('ascii')
-            
-            # Проверяем размеры
-            width_match = re.search(r'W(\d+)', header)
-            height_match = re.search(r'H(\d+)', header)
-            
-            if not width_match or not height_match:
-                raise ValueError("Не удалось извлечь размеры из заголовка Y4M")
-            
-            width_val = int(width_match.group(1))
-            height_val = int(height_match.group(1))
-            
-            if width_val != width or height_val != height:
-                raise ValueError(f"Размеры не совпадают: ожидалось {width}x{height}, "
-                               f"получено {width_val}x{height_val}")
-            
+                        
             # Пропускаем кадры вводной последовательности
-            video_processor = VideoProcessor()
-            self._skip_intro_frames(f, video_processor, width_val, height_val, intro_frames_count)
+            self._skip_intro_frames(f, video_processor, actual_width, actual_height, 
+                                   intro_frames_count, actual_chroma_format)
             
             # Счетчики для статистики
             frames_checked = 0
@@ -202,8 +241,10 @@ class ValidationProcessor:
                     
                     # Для каждого кадра в этом паттерне
                     for frame_idx in range(frames_per_pattern):
-                        # Читаем кадр
-                        actual_frame = video_processor.read_y4m_frame(f, width_val, height_val)
+                        # Читаем кадр с учетом формата
+                        actual_frame = video_processor.read_y4m_frame(
+                            f, actual_width, actual_height, actual_chroma_format)
+                        
                         if actual_frame is None:
                             print(f"Ошибка чтения кадра (паттерн {pattern_idx}, кадр {frame_idx})")
                             continue
@@ -213,9 +254,11 @@ class ValidationProcessor:
                             video_processor.save_debug_frame(
                                 actual_frame, f"decoded_pattern_{pattern_idx}", self.debug_dir)
                         
-                        # Проверяем кадр
+                        # Проверяем кадр с учетом формата
                         result, details = self.verify_frame(
-                            expected_frame, actual_frame, patches_mask, deviation, max_miss_percent)
+                            expected_frame, actual_frame, patches_mask, 
+                            deviation, max_miss_percent, actual_chroma_format)
+                            
                         frames_checked += 1
                         
                         if result:
@@ -235,7 +278,8 @@ class ValidationProcessor:
         video_processor: VideoProcessor, 
         width: int, 
         height: int, 
-        intro_frames_count: int
+        intro_frames_count: int,
+        chroma_format: str = ChromaFormat.YUV_422
     ) -> None:
         """
         Пропускает вводные кадры перед валидацией.
@@ -246,8 +290,9 @@ class ValidationProcessor:
             width: Ширина кадра
             height: Высота кадра
             intro_frames_count: Количество кадров для пропуска
+            chroma_format: Формат цветовой субдискретизации
         """
         if intro_frames_count > 0:
             print(f"Пропуск {intro_frames_count} вводных кадров...")
             for _ in range(intro_frames_count):
-                _ = video_processor.read_y4m_frame(file, width, height)
+                _ = video_processor.read_y4m_frame(file, width, height, chroma_format)

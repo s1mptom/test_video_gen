@@ -3,7 +3,7 @@
 Генератор цветовых паттернов для калибровки и построения 3D LUT.
 
 Пример использования:
-    python main.py --width 1920 --height 1080 --patch-size 16 --patch-gap 4 --color-range 100
+    python main.py --width 1920 --height 1080 --patch-size 16 --patch-gap 4 --color-range 100 --chroma-format 422
 """
 
 import os
@@ -17,6 +17,7 @@ from src.video_processor import VideoProcessor
 from src.validation_processor import ValidationProcessor
 from src.visual_validation.visual_validator import VisualValidationProcessor
 from src.pattern_metadata import PatternMetadataHandler
+from src.utils.constants import ColorRange, ChromaFormat
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,12 +38,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-gap", type=int, default=4, help="Промежуток между патчами (пикс)")
     
     # Параметры цветов и видео
-    parser.add_argument("--color-range", type=float, default=50.0,
+    parser.add_argument("--color-range-percent", type=float, default=50.0,
                       help="Процент цветового диапазона [0-100]")
     parser.add_argument("--bit-depth", type=int, default=8, help="Глубина цвета (бит)")
     parser.add_argument("--fps", type=int, default=30, help="Частота кадров")
     parser.add_argument("--frames-per-pattern", type=int, default=5,
                       help="Количество кадров на паттерн")
+    
+    # Новые параметры для цветового диапазона и формата
+    parser.add_argument("--chroma-format", type=str, default="422", choices=["420", "422", "444"],
+                      help="Формат цветовой субдискретизации (420, 422, 444)")
+    parser.add_argument("--color-range", type=str, default="limited", choices=["limited", "full"],
+                      help="Цветовой диапазон (limited, full)")
     
     # Другие параметры
     parser.add_argument("--output-dir", type=str, default="output",
@@ -62,11 +69,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-"""
-Оптимизированная функция generate_and_validate из main.py 
-с более эффективной обработкой метаданных
-"""
-
 def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path]]:
     """
     Выполняет полный цикл генерации и валидации видео.
@@ -85,14 +87,22 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     if debug_dir:
         debug_dir.mkdir(exist_ok=True)
     
-    # Создаем компоненты системы
+    # Нормализуем форматы
+    chroma_format = getattr(ChromaFormat, f"YUV_{args.chroma_format}")
+    color_range = getattr(ColorRange, args.color_range.upper())
+    
+    print(f"Выбраны параметры: формат={chroma_format}, диапазон={color_range}")
+    
+    # Создаем компоненты системы с поддержкой новых параметров
     pattern_generator = PatternGenerator(
         width=args.width,
         height=args.height,
         patch_size=args.patch_size,
         patch_gap=args.patch_gap,
-        color_range_percent=args.color_range,
-        bit_depth=args.bit_depth
+        color_range_percent=args.color_range_percent,
+        bit_depth=args.bit_depth,
+        chroma_subsampling=chroma_format,
+        color_range=color_range
     )
     
     video_processor = VideoProcessor(output_dir=args.output_dir)
@@ -101,17 +111,20 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     visual_validator = VisualValidationProcessor(
         output_dir=args.output_dir, debug_mode=args.debug, debug_dir=debug_dir)
     
+    # Сохраняем все параметры в конфигурации
     config = {
         "width": args.width,
         "height": args.height,
         "patch_size": args.patch_size,
         "patch_gap": args.patch_gap,
-        "color_range_percent": args.color_range,
+        "color_range_percent": args.color_range_percent,
         "bit_depth": args.bit_depth,
         "fps": args.fps,
         "frames_per_pattern": args.frames_per_pattern,
         "add_intro": args.add_intro,
-        "generator_version": "1.0",
+        "chroma_format": chroma_format,
+        "color_range": color_range,
+        "generator_version": "1.1",
     }
 
     metadata_handler.save_config_metadata(config)
@@ -142,7 +155,7 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     # Записываем все метаданные на диск за один раз
     metadata_handler.flush_metadata()
     
-    # Генерируем Y4M
+    # Генерируем Y4M с поддержкой указанных формата и диапазона
     y4m_path, expected_frames, intro_frames_count = video_processor.generate_y4m(
         pattern_generator=pattern_generator,
         frames_per_pattern=args.frames_per_pattern,
@@ -150,14 +163,24 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
         filename="temp.y4m",
         debug_mode=args.debug,
         debug_dir=debug_dir,
-        add_intro=args.add_intro
+        add_intro=args.add_intro,
+        chroma_format=chroma_format,
+        color_range=color_range
     )
     
-    # Кодируем видео
-    mp4_path = video_processor.encode_video(y4m_path, output_name=args.output_name)
+    # Кодируем видео с указанным цветовым диапазоном
+    mp4_path = video_processor.encode_video(
+        y4m_path, 
+        output_name=args.output_name,
+        color_range=color_range
+    )
     
-    # Декодируем для валидации
-    validation_y4m = video_processor.decode_for_validation(mp4_path)
+    # Декодируем для валидации с учетом формата и диапазона
+    validation_y4m = video_processor.decode_for_validation(
+        mp4_path, 
+        chroma_format=chroma_format,
+        color_range=color_range
+    )
     
     # Валидируем
     is_valid = validation_processor.validate(
@@ -170,7 +193,8 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
         patches_mask=pattern_generator.patches_mask,
         deviation=args.deviation,
         max_miss_percent=args.max_miss_percent,
-        intro_frames_count=intro_frames_count
+        intro_frames_count=intro_frames_count,
+        chroma_format=chroma_format
     )
     
     # Запускаем визуальную валидацию (если не отключена)
@@ -184,7 +208,8 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
             frames_per_pattern=args.frames_per_pattern,
             intro_frames_count=intro_frames_count,
             deviation=args.deviation,
-            max_miss_percent=args.max_miss_percent
+            max_miss_percent=args.max_miss_percent,
+            chroma_format=chroma_format
         )
         
         # Сохраняем статистику визуальной валидации
@@ -216,6 +241,13 @@ def main() -> None:
         
         if is_valid:
             print(f"✅ Валидация успешна! Видео: {mp4_path}")
+            
+            # Вывод информации о созданном файле
+            print(f"Параметры видео:")
+            print(f"  Разрешение: {args.width}x{args.height}")
+            print(f"  Формат цветности: YUV{args.chroma_format}")
+            print(f"  Цветовой диапазон: {args.color_range}")
+            print(f"  Количество паттернов: {1}+")  # Здесь можно вывести реальное количество паттернов
         else:
             print(f"❌ Ошибка валидации! Видео: {mp4_path}")
     except Exception as e:

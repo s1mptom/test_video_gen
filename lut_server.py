@@ -21,6 +21,9 @@ from hyperionnet.Reply import Reply, ReplyStart, ReplyEnd, ReplyAddVideo, ReplyA
 # Import the LUT Builder
 from lut_builder import LutBuilder
 
+# Import constants
+from src.utils.constants import ChromaFormat, ColorRange
+
 
 def parse_args():
     """Parse command line arguments."""
@@ -33,16 +36,28 @@ def parse_args():
                       help="Server port")
     parser.add_argument("--save-frames", action="store_true",
                       help="Save received frames to disk")
+    parser.add_argument("--chroma-format", type=str, default="422", choices=["420", "422", "444"],
+                      help="Chroma subsampling format (420, 422, 444)")
+    parser.add_argument("--color-range", type=str, default="limited", choices=["limited", "full"],
+                      help="Color range (limited, full)")
     return parser.parse_args()
 
 
 def start_server(args):
     """Start the LUT calibration server."""
-    # Initialize LUT Builder
+    # Convert format and range strings to constants
+    chroma_format = getattr(ChromaFormat, f"YUV_{args.chroma_format}")
+    color_range = getattr(ColorRange, args.color_range.upper())
+    
+    print(f"Using format {chroma_format}, range {color_range}")
+    
+    # Initialize LUT Builder with specified format and range
     print("Initializing LUT Builder...")
     lut_builder = LutBuilder(
         metadata_path=args.metadata,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        chroma_format=chroma_format,
+        color_range=color_range
     )
     
     # Create frames directory if saving frames
@@ -58,6 +73,8 @@ def start_server(args):
         "frames_received": 0,
         "frames_processed": 0,
         "patterns_recognized": 0,
+        "chroma_format": args.chroma_format,
+        "color_range": args.color_range,
         "last_update": datetime.now().isoformat()
     }
     
@@ -141,7 +158,7 @@ def process_request(request, client_socket, lut_builder, frames_dir, stats):
     print(f"[*] Command type: {command_type}")
     
     if command_type == 2:  # Image command
-        process_image(request, client_socket, lut_builder, frames_dir, stats)  # Передаем client_socket
+        process_image(request, client_socket, lut_builder, frames_dir, stats)
     elif command_type == 4:  # Registration
         process_registration(request, client_socket)
     else:
@@ -185,6 +202,11 @@ def process_image(request, client_socket, lut_builder, frames_dir, stats):
         uv_data = nv12_image.UvDataAsNumpy()
         print(f"[*] Received NV12Image with dimensions {width}x{height}")
         
+        # Get format and range from LUT builder
+        chroma_format = lut_builder.chroma_format
+        color_range = lut_builder.color_range
+        print(f"[*] Processing with format {chroma_format}, range {color_range}")
+        
         # Process frame for LUT building
         start_time = time.time()
         success = lut_builder.process_frame(y_data, uv_data, width, height)
@@ -199,21 +221,22 @@ def process_image(request, client_socket, lut_builder, frames_dir, stats):
         
         # Optionally save the frame
         if frames_dir:
-            frame_path = frames_dir / f"nv12_frame_{stats['frames_received']}.yuv"
+            # Include format and range in the filename
+            frame_path = frames_dir / f"nv12_frame_{stats['frames_received']}_{chroma_format}_{color_range}.yuv"
             with open(frame_path, "wb") as f:
                 f.write(y_data.tobytes())
                 f.write(uv_data.tobytes())
             print(f"[*] Saved NV12 frame to {frame_path}")
     
-    # Отправляем ответ, чтобы предотвратить закрытие соединения
+    # Send response to prevent connection closure
     try:
         builder = flatbuffers.Builder(0)
         
-        # Создаем объект Reply
+        # Create Reply object
         ReplyStart(builder)
-        video_status = 1 if success else 0  # 1 = успех, 0 = не обработано
+        video_status = 1 if success else 0  # 1 = success, 0 = not processed
         ReplyAddVideo(builder, video_status)
-        ReplyAddRegistered(builder, -1)  # Этот параметр не используется для изображений
+        ReplyAddRegistered(builder, -1)  # Not used for images
         reply = ReplyEnd(builder)
         
         builder.Finish(reply)
@@ -221,7 +244,7 @@ def process_image(request, client_socket, lut_builder, frames_dir, stats):
         data = builder.Output()
         message_size = len(data)
         
-        # Отправляем размер как 4-байтное big-endian целое
+        # Send size as 4-byte big-endian integer
         header = message_size.to_bytes(4, byteorder='big')
         
         client_socket.sendall(header + data)

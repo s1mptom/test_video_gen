@@ -1,19 +1,92 @@
 """Константы для проекта генерации цветовых паттернов."""
 
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
-# Цветовые константы YUV
-Y_BLACK = 16
-Y_WHITE = 235
-UV_NEUTRAL = 128
+# Цветовой диапазон (range)
+class ColorRange:
+    LIMITED = "limited"
+    FULL = "full"
 
-# Цветовые ограничения для видео (BT.709)
-Y_MIN = 16
-Y_MAX = 235
-Y_RANGE = Y_MAX - Y_MIN  # 219
-UV_MIN = 16
-UV_MAX = 240
-UV_RANGE = 224
+# Форматы цветовой субдискретизации
+class ChromaFormat:
+    YUV_420 = "420"
+    YUV_422 = "422"
+    YUV_444 = "444"
+
+# Цветовые константы YUV для LIMITED range
+Y_BLACK_LIMITED = 16
+Y_WHITE_LIMITED = 235
+UV_NEUTRAL_LIMITED = 128
+
+# Цветовые константы YUV для FULL range
+Y_BLACK_FULL = 0
+Y_WHITE_FULL = 255
+UV_NEUTRAL_FULL = 128
+
+# По умолчанию используем LIMITED range
+Y_BLACK = Y_BLACK_LIMITED
+Y_WHITE = Y_WHITE_LIMITED
+UV_NEUTRAL = UV_NEUTRAL_LIMITED
+
+# Цветовые ограничения для видео (BT.709) в LIMITED range
+Y_MIN_LIMITED = 16
+Y_MAX_LIMITED = 235
+Y_RANGE_LIMITED = Y_MAX_LIMITED - Y_MIN_LIMITED  # 219
+UV_MIN_LIMITED = 16
+UV_MAX_LIMITED = 240
+UV_RANGE_LIMITED = 224
+
+# Цветовые ограничения для видео (BT.709) в FULL range
+Y_MIN_FULL = 0
+Y_MAX_FULL = 255
+Y_RANGE_FULL = Y_MAX_FULL - Y_MIN_FULL  # 255
+UV_MIN_FULL = 0
+UV_MAX_FULL = 255
+UV_RANGE_FULL = 255
+
+# По умолчанию используем LIMITED range
+Y_MIN = Y_MIN_LIMITED
+Y_MAX = Y_MAX_LIMITED
+Y_RANGE = Y_RANGE_LIMITED
+UV_MIN = UV_MIN_LIMITED
+UV_MAX = UV_MAX_LIMITED
+UV_RANGE = UV_RANGE_LIMITED
+
+# Функции для получения констант в зависимости от выбранного диапазона
+def get_yuv_constants(color_range: str = ColorRange.LIMITED) -> Dict[str, int]:
+    """
+    Возвращает константы YUV в зависимости от выбранного диапазона.
+    
+    Args:
+        color_range: Цветовой диапазон (limited или full)
+        
+    Returns:
+        Dict[str, int]: Словарь с константами
+    """
+    if color_range == ColorRange.FULL:
+        return {
+            "Y_BLACK": Y_BLACK_FULL,
+            "Y_WHITE": Y_WHITE_FULL,
+            "UV_NEUTRAL": UV_NEUTRAL_FULL,
+            "Y_MIN": Y_MIN_FULL,
+            "Y_MAX": Y_MAX_FULL,
+            "Y_RANGE": Y_RANGE_FULL,
+            "UV_MIN": UV_MIN_FULL,
+            "UV_MAX": UV_MAX_FULL,
+            "UV_RANGE": UV_RANGE_FULL,
+        }
+    else:
+        return {
+            "Y_BLACK": Y_BLACK_LIMITED,
+            "Y_WHITE": Y_WHITE_LIMITED,
+            "UV_NEUTRAL": UV_NEUTRAL_LIMITED,
+            "Y_MIN": Y_MIN_LIMITED,
+            "Y_MAX": Y_MAX_LIMITED,
+            "Y_RANGE": Y_RANGE_LIMITED,
+            "UV_MIN": UV_MIN_LIMITED,
+            "UV_MAX": UV_MAX_LIMITED,
+            "UV_RANGE": UV_RANGE_LIMITED,
+        }
 
 # Количество бит для кодирования номера паттерна
 PATTERN_NUMBER_BITS = 12

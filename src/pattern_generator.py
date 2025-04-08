@@ -6,10 +6,11 @@ from typing import Dict, List, Tuple, Optional, Any
 
 from .utils.constants import (
     Y_BLACK, Y_WHITE, UV_NEUTRAL, MARKER_PATCHES,
-    PATTERN_NUMBER_BITS, CALIBRATION_COLORS
+    PATTERN_NUMBER_BITS, CALIBRATION_COLORS,
+    ColorRange, ChromaFormat, get_yuv_constants
 )
 from .utils.color_transforms import rgb_to_yuv_bt709
-from .utils.yuv_utils import create_yuv_buffer
+from .utils.yuv_utils import create_yuv_buffer, get_chroma_dimensions
 
 
 @dataclass
@@ -33,7 +34,8 @@ class PatternGenerator:
         patch_gap: int, 
         color_range_percent: float,
         bit_depth: int = 8,
-        chroma_subsampling: str = "422"  # Изменим дефолтное значение на 422
+        chroma_subsampling: str = ChromaFormat.YUV_422,
+        color_range: str = ColorRange.LIMITED
     ):
         """
         Инициализирует генератор цветовых паттернов.
@@ -45,7 +47,8 @@ class PatternGenerator:
             patch_gap: Промежуток между патчами
             color_range_percent: Процент используемого цветового диапазона [0-100]
             bit_depth: Глубина цвета (по умолчанию 8 бит)
-            chroma_subsampling: Формат цветовой субдискретизации
+            chroma_subsampling: Формат цветовой субдискретизации ("420", "422", "444")
+            color_range: Цветовой диапазон ('limited' или 'full')
         """
         self.width = width
         self.height = height
@@ -54,7 +57,11 @@ class PatternGenerator:
         self.color_range_percent = color_range_percent
         self.bit_depth = bit_depth
         self.chroma_subsampling = chroma_subsampling
+        self.color_range = color_range
         self.max_value = (1 << bit_depth) - 1
+        
+        # Получаем константы YUV в зависимости от выбранного диапазона
+        self.yuv_const = get_yuv_constants(color_range)
         
         # Рассчитываем количество патчей
         self.patches_x = width // (patch_size + patch_gap)
@@ -93,6 +100,7 @@ class PatternGenerator:
         print(f"Сетка патчей: {self.patches_x}x{self.patches_y} = {self.total_patches} патчей")
         print(f"Из них {self.available_patches} для цветовых образцов "
               f"и {self.patches_x} для технической строки")
+        print(f"Формат цветности: YUV{self.chroma_subsampling}, Диапазон: {self.color_range}")
     
     def _initialize_patch_coordinates(self) -> None:
         """Предварительно вычисляет координаты всех патчей."""
@@ -103,13 +111,24 @@ class PatternGenerator:
             x1 = patch_x * (self.patch_size + self.patch_gap)
             y1 = patch_y * (self.patch_size + self.patch_gap)
             
-            x1_uv = x1 // 2
-            # В 422 формате Y-координаты не делятся на 2
-            y1_uv = y1 if self.chroma_subsampling == "422" else y1 // 2
-            
-            patch_size_uv_x = self.patch_size // 2
-            # В 422 формате размер патча по вертикали не делится на 2
-            patch_size_uv_y = self.patch_size if self.chroma_subsampling == "422" else self.patch_size // 2
+            # Определяем координаты UV в зависимости от формата субдискретизации
+            if self.chroma_subsampling == ChromaFormat.YUV_420:
+                x1_uv = x1 // 2
+                y1_uv = y1 // 2
+                patch_size_uv_x = self.patch_size // 2
+                patch_size_uv_y = self.patch_size // 2
+            elif self.chroma_subsampling == ChromaFormat.YUV_422:
+                x1_uv = x1 // 2
+                y1_uv = y1  # В 422 формате Y-координаты не делятся на 2
+                patch_size_uv_x = self.patch_size // 2
+                patch_size_uv_y = self.patch_size
+            elif self.chroma_subsampling == ChromaFormat.YUV_444:
+                x1_uv = x1
+                y1_uv = y1
+                patch_size_uv_x = self.patch_size
+                patch_size_uv_y = self.patch_size
+            else:
+                raise ValueError(f"Неподдерживаемый формат субдискретизации: {self.chroma_subsampling}")
             
             # Определяем, является ли патч техническим
             is_tech = (patch_y == self.tech_row)
@@ -164,7 +183,10 @@ class PatternGenerator:
             Dict[str, np.ndarray]: Маски для Y, U и V плоскостей
         """
         mask_y = np.zeros((self.height, self.width), dtype=np.uint8)
-        mask_uv = np.zeros((self.height // 2, self.width // 2), dtype=np.uint8)
+        
+        # Определяем размеры хроматических плоскостей
+        uv_height, uv_width = get_chroma_dimensions(self.height, self.width, self.chroma_subsampling)
+        mask_uv = np.zeros((uv_height, uv_width), dtype=np.uint8)
         
         # Заполняем маску для всех патчей, включая технические
         for coords in self.patch_coords:
@@ -188,8 +210,13 @@ class PatternGenerator:
         Returns:
             Dict[str, np.ndarray]: Буфер кадра с Y, U и V плоскостями
         """
-        # Создаем буфер кадра
-        frame = create_yuv_buffer(self.height, self.width, self.chroma_subsampling)
+        # Создаем буфер кадра с учетом выбранных цветового диапазона и формата
+        frame = create_yuv_buffer(
+            self.height, 
+            self.width, 
+            self.chroma_subsampling, 
+            self.color_range
+        )
         
         # Определяем какие цвета использовать для этого паттерна
         start_idx = pattern_index * self.available_patches
@@ -204,8 +231,8 @@ class PatternGenerator:
         patches_count = min(len(colors), self.available_patches)
         rgb_array = np.array(colors[:patches_count])
         
-        # Быстрое преобразование RGB в YUV для всех цветов сразу
-        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array)
+        # Быстрое преобразование RGB в YUV для всех цветов сразу, с учетом цветового диапазона
+        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array, self.color_range)
         
         # Заполняем цветовые патчи (исключая техническую строку)
         color_idx = 0
@@ -268,9 +295,9 @@ class PatternGenerator:
         # Начинаем с позиции после маркера
         start_idx = MARKER_PATCHES
         
-        # Преобразуем RGB цвета в YUV
+        # Преобразуем RGB цвета в YUV с учетом выбранного цветового диапазона
         rgb_array = np.array(CALIBRATION_COLORS)
-        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array)
+        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array, self.color_range)
         
         # Рисуем калибровочные цвета
         for i, color_idx in enumerate(range(start_idx, min(start_idx + len(CALIBRATION_COLORS), self.patches_x))):
@@ -293,13 +320,17 @@ class PatternGenerator:
             patch_idx = self.tech_patch_indices[color_idx]
             coords = self.patch_coords[patch_idx]
             
+            # Используем константы с учетом выбранного цветового диапазона
+            y_black = self.yuv_const["Y_BLACK"]
+            uv_neutral = self.yuv_const["UV_NEUTRAL"]
+            
             # Черный цвет в Y, нейтральный в UV
             frame['Y'][coords.y_range[0]:coords.y_range[1], 
-                     coords.x_range[0]:coords.x_range[1]] = Y_BLACK
+                     coords.x_range[0]:coords.x_range[1]] = y_black
             frame['U'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                     coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                     coords.x_uv_range[0]:coords.x_uv_range[1]] = uv_neutral
             frame['V'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                     coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                     coords.x_uv_range[0]:coords.x_uv_range[1]] = uv_neutral
     
     def _draw_pattern_number(self, frame: Dict[str, np.ndarray], pattern_index: int) -> str:
         """
@@ -315,6 +346,11 @@ class PatternGenerator:
         # Преобразуем номер паттерна в N-битное двоичное представление
         binary = format(pattern_index, f'0{PATTERN_NUMBER_BITS}b')
         
+        # Получаем константы с учетом выбранного цветового диапазона
+        y_black = self.yuv_const["Y_BLACK"]
+        y_white = self.yuv_const["Y_WHITE"]
+        uv_neutral = self.yuv_const["UV_NEUTRAL"]
+        
         # Рисуем каждый бит как отдельный патч (индексы 2-13)
         for bit_idx, bit in enumerate(binary):
             patch_idx = self.marker_indices[2 + bit_idx]  # Смещение на 2 для пропуска якорей
@@ -322,7 +358,7 @@ class PatternGenerator:
             
             # Определяем цвет (белый для 1, черный для 0)
             # Используем экстремальные значения для максимального контраста
-            color = Y_WHITE if bit == '1' else Y_BLACK
+            color = y_white if bit == '1' else y_black
             
             # Заполняем Y-плоскость
             frame['Y'][coords.y_range[0]:coords.y_range[1], 
@@ -330,9 +366,9 @@ class PatternGenerator:
             
             # Заполняем U и V плоскости (нейтральный серый)
             frame['U'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = uv_neutral
             frame['V'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = uv_neutral
         
         return binary
     
@@ -360,6 +396,11 @@ class PatternGenerator:
         # Преобразуем контрольную сумму в 4-битное представление
         checksum_binary = format(checksum, '04b')
         
+        # Получаем константы с учетом выбранного цветового диапазона
+        y_black = self.yuv_const["Y_BLACK"]
+        y_white = self.yuv_const["Y_WHITE"]
+        uv_neutral = self.yuv_const["UV_NEUTRAL"]
+        
         # Рисуем контрольную сумму (индексы 14-17)
         for bit_idx, bit in enumerate(checksum_binary):
             patch_idx = self.marker_indices[14 + bit_idx]
@@ -367,7 +408,7 @@ class PatternGenerator:
             
             # Определяем цвет (белый для 1, черный для 0)
             # Используем экстремальные значения для максимального контраста
-            color = Y_WHITE if bit == '1' else Y_BLACK
+            color = y_white if bit == '1' else y_black
             
             # Заполняем Y-плоскость
             frame['Y'][coords.y_range[0]:coords.y_range[1], 
@@ -375,9 +416,9 @@ class PatternGenerator:
             
             # Заполняем U и V плоскости (нейтральный серый)
             frame['U'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = uv_neutral
             frame['V'][coords.y_uv_range[0]:coords.y_uv_range[1], 
-                    coords.x_uv_range[0]:coords.x_uv_range[1]] = UV_NEUTRAL
+                    coords.x_uv_range[0]:coords.x_uv_range[1]] = uv_neutral
         
         return checksum_binary
     
@@ -390,7 +431,6 @@ class PatternGenerator:
         """
         self._draw_checkered_pattern(frame, 0, 1, is_start=True)
 
-
     def _draw_anchor_end(self, frame: Dict[str, np.ndarray]) -> None:
         """
         Рисует высококонтрастную конечную якорную метку.
@@ -399,7 +439,6 @@ class PatternGenerator:
             frame: Буфер кадра
         """
         self._draw_checkered_pattern(frame, 18, 19, is_start=False)
-
 
     def _draw_checkered_pattern(
         self, 
@@ -417,6 +456,11 @@ class PatternGenerator:
             end_idx: Конечный индекс в списке маркерных патчей
             is_start: True для начальной метки, False для конечной
         """
+        # Получаем константы с учетом выбранного цветового диапазона
+        y_black = self.yuv_const["Y_BLACK"]
+        y_white = self.yuv_const["Y_WHITE"]
+        uv_neutral = self.yuv_const["UV_NEUTRAL"]
+        
         for i in range(start_idx, end_idx + 1):
             patch_idx = self.marker_indices[i]
             coords = self.patch_coords[patch_idx]
@@ -452,10 +496,10 @@ class PatternGenerator:
             # Конечная метка: 1-й патч (БЧ/ЧБ), 2-й патч (ЧБ/БЧ) - инверсия начальной
             if is_start:
                 # Для начальной метки
-                colors = [Y_BLACK, Y_WHITE] if i == start_idx else [Y_WHITE, Y_BLACK]
+                colors = [y_black, y_white] if i == start_idx else [y_white, y_black]
             else:
                 # Для конечной метки (инверсия)
-                colors = [Y_WHITE, Y_BLACK] if i == start_idx else [Y_BLACK, Y_WHITE]
+                colors = [y_white, y_black] if i == start_idx else [y_black, y_white]
             
             # Заполняем квадранты шахматным узором с максимальной контрастностью
             for q in range(4):
@@ -470,8 +514,8 @@ class PatternGenerator:
                 frame['Y'][y1:y2, x1:x2] = color
                 
                 # U и V плоскости (нейтральный серый) для чистого ч/б
-                frame['U'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
-                frame['V'][yuv1:yuv2, xuv1:xuv2] = UV_NEUTRAL
+                frame['U'][yuv1:yuv2, xuv1:xuv2] = uv_neutral
+                frame['V'][yuv1:yuv2, xuv1:xuv2] = uv_neutral
                 
     def generate_pattern_metadata(self, pattern_index: int) -> Dict[str, Any]:
         """
@@ -501,8 +545,8 @@ class PatternGenerator:
         # Оптимизация: используем numpy для более эффективной работы с массивами
         rgb_array = np.array(colors[:patches_count], dtype=np.uint8)
         
-        # Быстрое преобразование RGB в YUV для всех цветов сразу
-        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array)
+        # Быстрое преобразование RGB в YUV для всех цветов сразу, с учетом цветового диапазона
+        y_values, u_values, v_values = rgb_to_yuv_bt709(rgb_array, self.color_range)
         
         # Преобразуем numpy-значения в Python-нативные типы
         colors_python = []
@@ -514,7 +558,11 @@ class PatternGenerator:
         metadata = {
             "pattern_idx": int(pattern_index),
             "colors": colors_python,
-            "patches": []
+            "patches": [],
+            "format": {
+                "chroma_subsampling": self.chroma_subsampling,
+                "color_range": self.color_range
+            }
         }
         
         # Конвертируем numpy массивы в обычные Python списки

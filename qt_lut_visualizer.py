@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 LUT Visualizer with RGB LUT as default and Numba acceleration for performance.
+Supports various chroma formats (420, 422, 444) and color ranges (limited, full).
 """
 
 import socket
@@ -26,7 +27,10 @@ except ImportError:
     print("[*] Numba not found - install with 'pip install numba' for better performance")
 
 # Qt imports
-from PySide6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget,
+    QComboBox, QCheckBox, QPushButton, QGridLayout, QGroupBox
+)
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtCore import Qt, Signal, QObject
 
@@ -38,13 +42,14 @@ from hyperionnet.NV12Image import NV12Image
 from hyperionnet.Register import Register
 from hyperionnet.Reply import Reply, ReplyStart, ReplyEnd, ReplyAddVideo, ReplyAddRegistered
 
-# Import for YUV to RGB conversion
+# Import for constants and conversions
+from src.utils.constants import ColorRange, ChromaFormat
 from src.utils.color_transforms import yuv_to_rgb_bt709
 
 
 # Signal for thread communication with Qt
 class FrameSignals(QObject):
-    new_frame = Signal(np.ndarray, np.ndarray)  # Original, LUT-applied
+    new_frame = Signal(np.ndarray, np.ndarray, str, str)  # Original, LUT-applied, format, range
 
 
 # Global variables
@@ -53,6 +58,9 @@ QT_APP = QApplication.instance() or QApplication(sys.argv)
 SIGNALS = FrameSignals()
 MAIN_WINDOW = None
 LUT_DATA = None
+# Global settings for format and range
+CHROMA_FORMAT = ChromaFormat.YUV_422
+COLOR_RANGE = ColorRange.LIMITED
 
 
 def parse_args():
@@ -64,36 +72,47 @@ def parse_args():
                       help="Port to listen for incoming frames")
     parser.add_argument("--save-frames", action="store_true",
                       help="Save received frames to disk")
+    parser.add_argument("--chroma-format", type=str, default="422", choices=["420", "422", "444"],
+                      help="Chroma subsampling format (420, 422, 444)")
+    parser.add_argument("--color-range", type=str, default="limited", choices=["limited", "full"],
+                      help="Color range (limited, full)")
     return parser.parse_args()
 
 
 # Numba-accelerated LUT application function
 if NUMBA_AVAILABLE:
     @jit(nopython=True, parallel=True)
-    def apply_lut_numba(y_plane, u_resized, v_resized, lut_data, height, width):
+    def apply_lut_numba(y_plane, u_resized, v_resized, lut_data, height, width, is_full_range=False):
         result = np.zeros((height, width, 3), dtype=np.uint8)
         
         for y in prange(height):
             for x in range(width):
-                # Получаем YUV значения
+                # Get YUV values
                 y_val = y_plane[y, x]
                 u_val = u_resized[y, x]
                 v_val = v_resized[y, x]
                 
-                # Преобразуем из ограниченного в полный диапазон
-                y_fullrange = int(((y_val - 16) * 255) / 219) if y_val >= 16 else 0
-                u_fullrange = int(((u_val - 16) * 255) / 224) if u_val >= 16 else 0
-                v_fullrange = int(((v_val - 16) * 255) / 224) if v_val >= 16 else 0
+                # Convert from range-specific to full range for LUT
+                if not is_full_range:
+                    # Limited range conversion
+                    y_fullrange = int(((y_val - 16) * 255) / 219) if y_val >= 16 else 0
+                    u_fullrange = int(((u_val - 16) * 255) / 224) if u_val >= 16 else 0
+                    v_fullrange = int(((v_val - 16) * 255) / 224) if v_val >= 16 else 0
+                else:
+                    # Already in full range
+                    y_fullrange = y_val
+                    u_fullrange = u_val
+                    v_fullrange = v_val
                 
-                # Ограничиваем значения
+                # Limit values
                 y_fullrange = max(0, min(255, y_fullrange))
                 u_fullrange = max(0, min(255, u_fullrange))
                 v_fullrange = max(0, min(255, v_fullrange))
                 
-                # Рассчитываем индекс
+                # Calculate index
                 idx = (y_fullrange + (u_fullrange << 8) + (v_fullrange << 16)) * 3
                 
-                # Проверка границ
+                # Check bounds
                 if idx < len(lut_data) - 2:
                     result[y, x, 0] = lut_data[idx+2]
                     result[y, x, 1] = lut_data[idx+1]
@@ -104,7 +123,11 @@ if NUMBA_AVAILABLE:
 
 def start_server(args):
     """Start the server."""
-    global MAIN_WINDOW, LUT_DATA
+    global MAIN_WINDOW, LUT_DATA, CHROMA_FORMAT, COLOR_RANGE
+    
+    # Set global format and range
+    CHROMA_FORMAT = getattr(ChromaFormat, f"YUV_{args.chroma_format}")
+    COLOR_RANGE = getattr(ColorRange, args.color_range.upper())
     
     # Load LUT
     print("Loading LUT data...")
@@ -112,12 +135,21 @@ def start_server(args):
     if not os.path.exists(lut_path):
         raise FileNotFoundError(f"LUT file not found: {lut_path}")
     
+    # Check for format and range-specific LUT
+    base_path = lut_path.parent
+    base_name = lut_path.stem
+    format_specific_lut = base_path / f"{base_name}_{args.chroma_format}_{args.color_range}.bin"
+    
+    if os.path.exists(format_specific_lut):
+        print(f"Found format-specific LUT for {args.chroma_format}/{args.color_range}")
+        lut_path = format_specific_lut
+    
     # Load the binary LUT data
     with open(lut_path, 'rb') as f:
         LUT_DATA = np.frombuffer(f.read(), dtype=np.uint8)
     
     print(f"LUT loaded: {len(LUT_DATA)} bytes")
-    print("[*] Using RGB LUT format (default)")
+    print(f"Using RGB LUT format with chroma: {CHROMA_FORMAT}, range: {COLOR_RANGE}")
     
     # Create frames directory if saving frames
     frames_dir = None
@@ -128,7 +160,7 @@ def start_server(args):
         frames_dir.mkdir(exist_ok=True, parents=True)
     
     # Initialize Qt window
-    MAIN_WINDOW = LutWindow(SIGNALS)
+    MAIN_WINDOW = LutWindow(SIGNALS, CHROMA_FORMAT, COLOR_RANGE)
     MAIN_WINDOW.show()
     
     # Connect signals
@@ -250,6 +282,8 @@ def process_request(request, client_socket, frames_dir, stats):
 
 def process_image(request, client_socket, frames_dir, stats):
     """Process an image command."""
+    global CHROMA_FORMAT, COLOR_RANGE
+    
     command = request.Command()
     image = Image()
     image.Init(command.Bytes, command.Pos)
@@ -286,8 +320,8 @@ def process_image(request, client_socket, frames_dir, stats):
             uv_data = nv12_image.UvDataAsNumpy()
             print(f"[*] Received NV12Image with dimensions {width}x{height}")
             
-            # Add frame to processing queue for display
-            FRAME_QUEUE.put((y_data, uv_data, width, height))
+            # Add frame to processing queue with format and range
+            FRAME_QUEUE.put((y_data, uv_data, width, height, CHROMA_FORMAT, COLOR_RANGE))
             
             # Mark as successfully processed
             success = True
@@ -376,17 +410,26 @@ def process_frames():
         while True:
             try:
                 # Get frame from queue with timeout
-                y_data, uv_data, width, height = FRAME_QUEUE.get(timeout=1.0)
+                frame_data = FRAME_QUEUE.get(timeout=1.0)
+                
+                if len(frame_data) == 4:  # Old format compatibility
+                    y_data, uv_data, width, height = frame_data
+                    chroma_format = CHROMA_FORMAT
+                    color_range = COLOR_RANGE
+                else:  # New format with explicit format and range
+                    y_data, uv_data, width, height, chroma_format, color_range = frame_data
                 
                 # Convert to RGB for display - using fast vectorized approach
                 start_time = time.time()
-                standard_rgb, lut_rgb = convert_frame_fast(y_data, uv_data, width, height)
+                standard_rgb, lut_rgb = convert_frame_fast(
+                    y_data, uv_data, width, height, chroma_format, color_range)
                 processing_time = time.time() - start_time
                 
                 print(f"[*] Frame conversion completed in {processing_time:.3f} seconds")
+                print(f"[*] Format: {chroma_format}, Range: {color_range}")
                 
                 # Send to UI
-                SIGNALS.new_frame.emit(standard_rgb, lut_rgb)
+                SIGNALS.new_frame.emit(standard_rgb, lut_rgb, chroma_format, color_range)
                 
             except queue.Empty:
                 # No frame in queue, just wait
@@ -398,7 +441,7 @@ def process_frames():
         traceback.print_exc()
 
 
-def apply_lut_fast(y_plane, u_resized, v_resized):
+def apply_lut_fast(y_plane, u_resized, v_resized, is_full_range=False):
     """
     Apply LUT to YUV values using the fastest approach available.
     
@@ -406,6 +449,7 @@ def apply_lut_fast(y_plane, u_resized, v_resized):
         y_plane: Y plane data
         u_resized: Resized U plane data
         v_resized: Resized V plane data
+        is_full_range: Whether the input is in full range
         
     Returns:
         np.ndarray: RGB image with LUT applied
@@ -414,7 +458,7 @@ def apply_lut_fast(y_plane, u_resized, v_resized):
     
     # Use Numba if available
     if NUMBA_AVAILABLE:
-        return apply_lut_numba(y_plane, u_resized, v_resized, LUT_DATA, height, width)
+        return apply_lut_numba(y_plane, u_resized, v_resized, LUT_DATA, height, width, is_full_range)
     
     # Fallback to vectorized NumPy if Numba is not available
     result = np.zeros((height, width, 3), dtype=np.uint8)
@@ -427,6 +471,13 @@ def apply_lut_fast(y_plane, u_resized, v_resized):
     y_flat = y_plane.flatten().astype(np.uint32)
     u_flat = u_resized.flatten().astype(np.uint32)
     v_flat = v_resized.flatten().astype(np.uint32)
+    
+    # Convert from range-specific to full range for LUT
+    if not is_full_range:
+        # Limited range conversion
+        y_flat = np.clip(((y_flat - 16) * 255) / 219, 0, 255).astype(np.uint32)
+        u_flat = np.clip(((u_flat - 16) * 255) / 224, 0, 255).astype(np.uint32)
+        v_flat = np.clip(((v_flat - 16) * 255) / 224, 0, 255).astype(np.uint32)
     
     for start_idx in range(0, total_pixels, batch_size):
         end_idx = min(start_idx + batch_size, total_pixels)
@@ -459,7 +510,14 @@ def apply_lut_fast(y_plane, u_resized, v_resized):
     return result
 
 
-def convert_frame_fast(y_data, uv_data, width, height):
+def convert_frame_fast(
+    y_data: np.ndarray, 
+    uv_data: np.ndarray, 
+    width: int, 
+    height: int,
+    chroma_format: str = ChromaFormat.YUV_422,
+    color_range: str = ColorRange.LIMITED
+) -> tuple:
     """
     Convert YUV frame to RGB using the fastest approach available.
     
@@ -468,6 +526,8 @@ def convert_frame_fast(y_data, uv_data, width, height):
         uv_data: UV plane data
         width: Frame width
         height: Frame height
+        chroma_format: Chroma subsampling format
+        color_range: Color range
     
     Returns:
         Tuple[np.ndarray, np.ndarray]: Standard RGB image, LUT-applied RGB image
@@ -476,33 +536,63 @@ def convert_frame_fast(y_data, uv_data, width, height):
         # 1. Convert NV12 to planar YUV
         y_plane = y_data.reshape((height, width))
         
-        # Process UV data (NV12 has interleaved U and V)
+        # Process UV data based on format
         uv_height = height // 2
         
         # Reshape and deinterleave UV data
         uv_data = uv_data.reshape((uv_height, width))
-        u_plane = uv_data[:, 0::2]
-        v_plane = uv_data[:, 1::2]
+        u_plane_420 = uv_data[:, 0::2]
+        v_plane_420 = uv_data[:, 1::2]
         
-        # 2. Resize UV planes to Y plane size
-        u_resized = cv2.resize(u_plane, (width, height), interpolation=cv2.INTER_NEAREST)
-        v_resized = cv2.resize(v_plane, (width, height), interpolation=cv2.INTER_NEAREST)
+        # Convert to the requested format
+        if chroma_format == ChromaFormat.YUV_420:
+            # For YUV420, we already have the correct format
+            u_plane = u_plane_420
+            v_plane = v_plane_420
+            
+            # Resize for visualization and LUT application
+            u_resized = cv2.resize(u_plane, (width, height), interpolation=cv2.INTER_NEAREST)
+            v_resized = cv2.resize(v_plane, (width, height), interpolation=cv2.INTER_NEAREST)
+        elif chroma_format == ChromaFormat.YUV_422:
+            # For YUV422, we need to upsample vertically
+            u_plane = cv2.resize(u_plane_420, (width//2, height), interpolation=cv2.INTER_LINEAR)
+            v_plane = cv2.resize(v_plane_420, (width//2, height), interpolation=cv2.INTER_LINEAR)
+            
+            # Resize for visualization and LUT application
+            u_resized = cv2.resize(u_plane, (width, height), interpolation=cv2.INTER_NEAREST)
+            v_resized = cv2.resize(v_plane, (width, height), interpolation=cv2.INTER_NEAREST)
+        elif chroma_format == ChromaFormat.YUV_444:
+            # For YUV444, we need to upsample both horizontally and vertically
+            u_plane = cv2.resize(u_plane_420, (width, height), interpolation=cv2.INTER_LINEAR)
+            v_plane = cv2.resize(v_plane_420, (width, height), interpolation=cv2.INTER_LINEAR)
+            
+            # Full resolution, no resize needed
+            u_resized = u_plane
+            v_resized = v_plane
+        else:
+            raise ValueError(f"Unsupported format: {chroma_format}")
         
-        # 3. Convert to RGB using standard formula
-        # yuv_to_rgb_bt709 returns BGR order for OpenCV
-        standard_rgb = yuv_to_rgb_bt709(y_plane, u_resized, v_resized)
+        # 3. Convert to RGB using standard formula with color range
+        is_full_range = (color_range == ColorRange.FULL)
+        standard_rgb = yuv_to_rgb_bt709(y_plane, u_resized, v_resized, color_range)
         
         # 4. Apply LUT using the fastest available method
         start_lut = time.time()
-        lut_rgb = apply_lut_fast(y_plane, u_resized, v_resized)
+        lut_rgb = apply_lut_fast(y_plane, u_resized, v_resized, is_full_range)
         lut_time = time.time() - start_lut
         print(f"[*] LUT application took {lut_time:.3f} seconds")
         
         # Add labels to images - OpenCV text rendering works with BGR
+        format_text = f"Format: {chroma_format}, Range: {color_range}"
         cv2.putText(standard_rgb, "Original", (10, 30), 
                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(standard_rgb, format_text, (10, 60), 
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+                  
         cv2.putText(lut_rgb, "LUT Applied", (10, 30), 
                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(lut_rgb, format_text, (10, 60), 
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
         
         return standard_rgb, lut_rgb
         
@@ -518,8 +608,11 @@ def convert_frame_fast(y_data, uv_data, width, height):
 class LutWindow(QMainWindow):
     """Qt window for displaying original and LUT-applied frames."""
     
-    def __init__(self, signals):
+    def __init__(self, signals, chroma_format=ChromaFormat.YUV_422, color_range=ColorRange.LIMITED):
         super().__init__()
+        
+        self.chroma_format = chroma_format
+        self.color_range = color_range
         
         # Set up UI
         self.setWindowTitle("LUT Visualizer")
@@ -531,6 +624,53 @@ class LutWindow(QMainWindow):
         
         # Create layout
         main_layout = QVBoxLayout(central_widget)
+        
+        # Add controls for format and range
+        controls_layout = QHBoxLayout()
+        
+        # Format selection
+        format_group = QGroupBox("Chroma Format")
+        format_layout = QHBoxLayout()
+        
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("4:2:0", ChromaFormat.YUV_420)
+        self.format_combo.addItem("4:2:2", ChromaFormat.YUV_422)
+        self.format_combo.addItem("4:4:4", ChromaFormat.YUV_444)
+        # Set default
+        index = self.format_combo.findData(chroma_format)
+        if index >= 0:
+            self.format_combo.setCurrentIndex(index)
+        
+        self.format_combo.currentIndexChanged.connect(self.update_format)
+        format_layout.addWidget(self.format_combo)
+        format_group.setLayout(format_layout)
+        
+        # Range selection
+        range_group = QGroupBox("Color Range")
+        range_layout = QHBoxLayout()
+        
+        self.range_combo = QComboBox()
+        self.range_combo.addItem("Limited", ColorRange.LIMITED)
+        self.range_combo.addItem("Full", ColorRange.FULL)
+        # Set default
+        index = self.range_combo.findData(color_range)
+        if index >= 0:
+            self.range_combo.setCurrentIndex(index)
+            
+        self.range_combo.currentIndexChanged.connect(self.update_range)
+        range_layout.addWidget(self.range_combo)
+        range_group.setLayout(range_layout)
+        
+        # Add controls to layout
+        controls_layout.addWidget(format_group)
+        controls_layout.addWidget(range_group)
+        
+        # Apply button
+        self.apply_button = QPushButton("Apply Settings")
+        self.apply_button.clicked.connect(self.apply_settings)
+        controls_layout.addWidget(self.apply_button)
+        
+        main_layout.addLayout(controls_layout)
         
         # Create frame display layout
         frame_layout = QHBoxLayout()
@@ -550,9 +690,36 @@ class LutWindow(QMainWindow):
         
         print("[*] LUT Window initialized")
     
-    def update_frames(self, original_frame, lut_frame):
+    def update_format(self, index):
+        """Update chroma format selection."""
+        self.chroma_format = self.format_combo.currentData()
+        print(f"[*] Format changed to: {self.chroma_format}")
+    
+    def update_range(self, index):
+        """Update color range selection."""
+        self.color_range = self.range_combo.currentData()
+        print(f"[*] Range changed to: {self.color_range}")
+    
+    def apply_settings(self):
+        """Apply the selected format and range settings."""
+        global CHROMA_FORMAT, COLOR_RANGE
+        CHROMA_FORMAT = self.chroma_format
+        COLOR_RANGE = self.color_range
+        print(f"[*] Applied settings: Format={CHROMA_FORMAT}, Range={COLOR_RANGE}")
+    
+    def update_frames(self, original_frame, lut_frame, chroma_format=None, color_range=None):
         """Update frame display with received frames."""
         try:
+            # If format and range provided, update UI selection
+            if chroma_format and color_range:
+                index = self.format_combo.findData(chroma_format)
+                if index >= 0 and self.format_combo.currentIndex() != index:
+                    self.format_combo.setCurrentIndex(index)
+                
+                index = self.range_combo.findData(color_range)
+                if index >= 0 and self.range_combo.currentIndex() != index:
+                    self.range_combo.setCurrentIndex(index)
+            
             # Important note: OpenCV uses BGR order, but Qt needs RGB
             # Convert from BGR to RGB for Qt display
             original_rgb = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)

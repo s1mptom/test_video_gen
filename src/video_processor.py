@@ -133,7 +133,7 @@ class VideoProcessor:
             )
             
             # Рисуем крупную цифру в центре
-            self._draw_large_digit(digit_frame, digit, width, height, color_range)
+            self._draw_large_digit(digit_frame, digit, width, height, color_range, chroma_format)
             
             # Повторяем кадр с этой цифрой на протяжении нужного времени
             for _ in range(seconds_per_digit):
@@ -147,7 +147,8 @@ class VideoProcessor:
         digit: int, 
         width: int, 
         height: int,
-        color_range: str = ColorRange.LIMITED
+        color_range: str = ColorRange.LIMITED,
+        chroma_format: str = ChromaFormat.YUV_422  # Добавляем параметр формата для консистентности
     ) -> None:
         """
         Рисует крупную цифру в центре кадра.
@@ -158,6 +159,7 @@ class VideoProcessor:
             width: Ширина кадра
             height: Высота кадра
             color_range: Цветовой диапазон
+            chroma_format: Формат цветовой субдискретизации
         """
         # Получаем значения в зависимости от цветового диапазона
         from .utils.constants import get_yuv_constants
@@ -204,13 +206,6 @@ class VideoProcessor:
         start_x = center_x - digit_width // 2
         start_y = center_y - digit_height // 2
         
-        # Получаем размеры хроматических плоскостей для текущего формата
-        uv_height, uv_width = get_chroma_dimensions(
-            height, 
-            width, 
-            frame['U'].shape[0] == height and frame['U'].shape[1] == width // 2 and frame['U'].shape[1] * 2 == width
-        )
-        
         # Рисуем включенные сегменты
         color = y_white  # белый
         for segment in segments.get(digit, []):
@@ -231,19 +226,20 @@ class VideoProcessor:
                             frame['Y'][y, x] = color
                             
                             # Вычисляем соответствующие UV координаты в зависимости от формата
-                            if frame['U'].shape[0] == height // 2:  # YUV420
+                            if chroma_format == ChromaFormat.YUV_420:
                                 uv_y, uv_x = y // 2, x // 2
                                 if 0 <= uv_y < frame['U'].shape[0] and 0 <= uv_x < frame['U'].shape[1]:
                                     frame['U'][uv_y, uv_x] = uv_neutral
                                     frame['V'][uv_y, uv_x] = uv_neutral
-                            elif frame['U'].shape[0] == height and frame['U'].shape[1] == width // 2:  # YUV422
+                            elif chroma_format == ChromaFormat.YUV_422:
                                 uv_y, uv_x = y, x // 2
                                 if 0 <= uv_y < frame['U'].shape[0] and 0 <= uv_x < frame['U'].shape[1]:
                                     frame['U'][uv_y, uv_x] = uv_neutral
                                     frame['V'][uv_y, uv_x] = uv_neutral
-                            elif frame['U'].shape[0] == height and frame['U'].shape[1] == width:  # YUV444
-                                frame['U'][y, x] = uv_neutral
-                                frame['V'][y, x] = uv_neutral
+                            elif chroma_format == ChromaFormat.YUV_444:
+                                if 0 <= y < frame['U'].shape[0] and 0 <= x < frame['U'].shape[1]:
+                                    frame['U'][y, x] = uv_neutral
+                                    frame['V'][y, x] = uv_neutral
             else:  # горизонтальная линия
                 for x in range(x1, x2 + 1):
                     for y in range(y1 - stroke_width // 2, y1 + stroke_width // 2 + 1):
@@ -251,20 +247,21 @@ class VideoProcessor:
                             frame['Y'][y, x] = color
                             
                             # Вычисляем соответствующие UV координаты в зависимости от формата
-                            if frame['U'].shape[0] == height // 2:  # YUV420
+                            if chroma_format == ChromaFormat.YUV_420:
                                 uv_y, uv_x = y // 2, x // 2
                                 if 0 <= uv_y < frame['U'].shape[0] and 0 <= uv_x < frame['U'].shape[1]:
                                     frame['U'][uv_y, uv_x] = uv_neutral
                                     frame['V'][uv_y, uv_x] = uv_neutral
-                            elif frame['U'].shape[0] == height and frame['U'].shape[1] == width // 2:  # YUV422
+                            elif chroma_format == ChromaFormat.YUV_422:
                                 uv_y, uv_x = y, x // 2
                                 if 0 <= uv_y < frame['U'].shape[0] and 0 <= uv_x < frame['U'].shape[1]:
                                     frame['U'][uv_y, uv_x] = uv_neutral
                                     frame['V'][uv_y, uv_x] = uv_neutral
-                            elif frame['U'].shape[0] == height and frame['U'].shape[1] == width:  # YUV444
-                                frame['U'][y, x] = uv_neutral
-                                frame['V'][y, x] = uv_neutral
-    
+                            elif chroma_format == ChromaFormat.YUV_444:
+                                if 0 <= y < frame['U'].shape[0] and 0 <= x < frame['U'].shape[1]:
+                                    frame['U'][y, x] = uv_neutral
+                                    frame['V'][y, x] = uv_neutral
+                                    
     def generate_y4m(
         self,
         pattern_generator,

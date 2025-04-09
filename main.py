@@ -201,15 +201,13 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     visual_validation_result = True
     if not args.skip_visual_validation:
         print("\nЗапуск визуальной валидации...")
-        visual_validation_result, validation_stats = visual_validator.visual_validate(
-            video_processor=video_processor,
-            y4m_path=validation_y4m,
-            pattern_generator=pattern_generator,
-            frames_per_pattern=args.frames_per_pattern,
-            intro_frames_count=intro_frames_count,
-            deviation=args.deviation,
-            max_miss_percent=args.max_miss_percent,
-            chroma_format=chroma_format
+        visual_validation_result, validation_stats = visual_validator.rgb_visual_validate(
+            mp4_path,  # Напрямую используем MP4 файл
+            pattern_generator,
+            args.frames_per_pattern,
+            intro_frames_count,
+            args.deviation,
+            args.max_miss_percent
         )
         
         # Сохраняем статистику визуальной валидации

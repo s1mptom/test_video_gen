@@ -324,11 +324,12 @@ class VideoProcessor:
             # Добавляем вводную последовательность, если требуется
             if add_intro:
                 intro_frames = self.generate_intro_sequence(
-                    pattern_generator.width, 
-                    pattern_generator.height, 
-                    fps,
-                    chroma_format,
-                    color_range
+                    width=pattern_generator.width,
+                    height=pattern_generator.height,
+                    fps=fps,
+                    intro_duration_seconds=10,
+                    chroma_format=chroma_format,
+                    color_range=color_range
                 )
                 intro_frames_count = len(intro_frames)
                 for intro_frame in intro_frames:

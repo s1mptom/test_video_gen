@@ -1,4 +1,4 @@
-"""Модуль для точной визуальной валидации паттернов."""
+"""Модуль для точной визуальной RGB-ориентированной валидации паттернов."""
 
 import os
 import cv2
@@ -7,16 +7,14 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 
-from ..pattern_metadata import PatternMetadataHandler
-from ..utils.color_transforms import rgb_to_yuv_bt709, yuv_to_rgb_bt709
-from ..utils.constants import (
-    Y_BLACK, Y_WHITE, UV_NEUTRAL, PATTERN_NUMBER_BITS,
-    ColorRange, ChromaFormat, get_yuv_constants
+from src.pattern_metadata import PatternMetadataHandler
+from src.utils.constants import (
+    PATTERN_NUMBER_BITS, ColorRange, ChromaFormat, get_yuv_constants
 )
 
 
 class VisualValidationProcessor:
-    """Класс для точной визуальной валидации цветовых паттернов."""
+    """Класс для точной RGB-ориентированной визуальной валидации цветовых паттернов."""
     
     def __init__(
         self, 
@@ -25,7 +23,7 @@ class VisualValidationProcessor:
         debug_dir: Optional[Path] = None
     ):
         """
-        Инициализирует процессор визуальной валидации.
+        Инициализирует процессор RGB визуальной валидации.
         
         Args:
             output_dir: Директория для выходных файлов
@@ -39,7 +37,7 @@ class VisualValidationProcessor:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
             
             # Создаем поддиректорию для маркеров
-            self.marker_debug_dir = self.debug_dir / "markers"
+            self.marker_debug_dir = self.debug_dir / "rgb_markers"
             self.marker_debug_dir.mkdir(exist_ok=True)
         else:
             self.marker_debug_dir = None
@@ -48,15 +46,15 @@ class VisualValidationProcessor:
     
     def read_pattern_marker(
         self, 
-        frame: Dict[str, np.ndarray], 
+        frame: np.ndarray, 
         pattern_generator,
         color_range: str = None
     ) -> Tuple[int, Dict[str, Any]]:
         """
-        Считывает маркер паттерна из технической строки с улучшенной проверкой якорных маркеров.
+        Считывает маркер паттерна из технической строки в RGB кадре.
         
         Args:
-            frame: Буфер кадра
+            frame: RGB кадр
             pattern_generator: Генератор паттернов с информацией о маркерах
             color_range: Цветовой диапазон (если None, определяется из pattern_generator)
             
@@ -66,11 +64,6 @@ class VisualValidationProcessor:
         # Определяем цветовой диапазон
         if color_range is None and hasattr(pattern_generator, 'color_range'):
             color_range = pattern_generator.color_range
-        
-        # Получаем константы в зависимости от цветового диапазона
-        yuv_const = get_yuv_constants(color_range)
-        y_black = yuv_const["Y_BLACK"]
-        y_white = yuv_const["Y_WHITE"]
         
         # Инициализация диагностических данных
         diagnostics = {
@@ -93,9 +86,9 @@ class VisualValidationProcessor:
             print(f"First marker patch Y range: {first_patch.y_range}")
             print(f"Technical row position check: {abs(first_patch.y_range[0] - tech_row_y) < 10}")
         
-        # Проверка якорных маркеров (передаем цветовой диапазон)
-        anchor_start_valid = self._check_anchor_pattern(frame, marker_patches[0:2], is_start=True, color_range=color_range)
-        anchor_end_valid = self._check_anchor_pattern(frame, marker_patches[-2:], is_start=False, color_range=color_range)
+        # Проверка якорных маркеров (в RGB)
+        anchor_start_valid = self._check_rgb_anchor_pattern(frame, marker_patches[0:2], is_start=True)
+        anchor_end_valid = self._check_rgb_anchor_pattern(frame, marker_patches[-2:], is_start=False)
         
         if not anchor_start_valid or not anchor_end_valid:
             diagnostics["error"] = {
@@ -106,7 +99,7 @@ class VisualValidationProcessor:
             
             # Сохраняем отладочное изображение
             if self.debug_mode and self.marker_debug_dir:
-                self._save_marker_debug_image(
+                self._save_rgb_marker_debug_image(
                     frame, marker_patches, "", "", 
                     "", diagnostics,
                     self.marker_debug_dir / f"marker_invalid_anchors.png"
@@ -120,25 +113,25 @@ class VisualValidationProcessor:
         id_patches = []
         for i in range(2, 14):  # Патчи идентификатора (2-13)
             patch = marker_patches[i - 0]  # -0 поскольку marker_patches уже содержит только маркерные патчи
-            y_values = frame['Y'][patch.y_range[0]:patch.y_range[1], 
-                            patch.x_range[0]:patch.x_range[1]]
+            y_values = self._extract_gray_value(frame, patch.y_range[0], patch.y_range[1], 
+                            patch.x_range[0], patch.x_range[1])
             id_patches.append(y_values)
         
         checksum_patches = []
         for i in range(14, 18):  # Патчи контрольной суммы (14-17)
             patch = marker_patches[i - 0]  # -0 поскольку marker_patches уже содержит только маркерные патчи
-            y_values = frame['Y'][patch.y_range[0]:patch.y_range[1], 
-                            patch.x_range[0]:patch.x_range[1]]
+            y_values = self._extract_gray_value(frame, patch.y_range[0], patch.y_range[1], 
+                            patch.x_range[0], patch.x_range[1])
             checksum_patches.append(y_values)
         
-        # Используем фиксированный порог, основанный на известных значениях Y_BLACK и Y_WHITE
-        threshold = (y_black + y_white) / 2
+        # Используем фиксированный порог для бинаризации
+        threshold = 128
         diagnostics["threshold"] = float(threshold)
         
         # Считываем биты идентификатора
         binary_str = ""
         for i, patch in enumerate(id_patches):
-            mean_value = float(np.mean(patch))
+            mean_value = float(patch)
             bit = '1' if mean_value > threshold else '0'
             binary_str += bit
             
@@ -159,7 +152,7 @@ class VisualValidationProcessor:
         # Считываем биты контрольной суммы
         checksum_binary = ""
         for i, patch in enumerate(checksum_patches):
-            mean_value = float(np.mean(patch))
+            mean_value = float(patch)
             bit = '1' if mean_value > threshold else '0'
             checksum_binary += bit
             
@@ -193,7 +186,7 @@ class VisualValidationProcessor:
             
             # Сохраняем отладочное изображение
             if self.debug_mode and self.marker_debug_dir:
-                self._save_marker_debug_image(
+                self._save_rgb_marker_debug_image(
                     frame, marker_patches, binary_str, checksum_binary, 
                     expected_checksum_binary, diagnostics,
                     self.marker_debug_dir / f"marker_error_{binary_str}.png"
@@ -207,7 +200,7 @@ class VisualValidationProcessor:
             
             # Сохраняем отладочное изображение для успешных маркеров тоже
             if self.debug_mode and self.marker_debug_dir:
-                self._save_marker_debug_image(
+                self._save_rgb_marker_debug_image(
                     frame, marker_patches, binary_str, checksum_binary, 
                     expected_checksum_binary, diagnostics,
                     self.marker_debug_dir / f"marker_success_{pattern_idx}.png"
@@ -225,22 +218,29 @@ class VisualValidationProcessor:
             }
             
             return -1, diagnostics
+    
+    def _extract_gray_value(self, frame, y1, y2, x1, x2):
+        """
+        Извлекает среднее значение яркости (серого) из RGB фрагмента.
+        """
+        patch = frame[y1:y2, x1:x2]
+        # Преобразуем RGB в оттенки серого (средняя яркость)
+        gray_value = np.mean(patch.mean(axis=2))
+        return gray_value
 
-    def _check_anchor_pattern(
+    def _check_rgb_anchor_pattern(
         self, 
-        frame: Dict[str, np.ndarray], 
+        frame: np.ndarray, 
         anchor_patches: List[Any], 
-        is_start: bool = True,
-        color_range: str = ColorRange.LIMITED
+        is_start: bool = True
     ) -> bool:
         """
-        Проверяет якорные маркеры на соответствие ожидаемому шаблону.
+        Проверяет якорные маркеры на соответствие ожидаемому шаблону в RGB.
         
         Args:
-            frame: Буфер кадра
+            frame: RGB кадр
             anchor_patches: Список якорных патчей (2 штуки)
             is_start: True для начальных якорей, False для конечных
-            color_range: Цветовой диапазон
         
         Returns:
             bool: True если якорные маркеры валидны
@@ -249,30 +249,27 @@ class VisualValidationProcessor:
             print(f"Неверное количество якорных патчей: {len(anchor_patches)}")
             return False
         
-        # Получаем константы в зависимости от цветового диапазона
-        yuv_const = get_yuv_constants(color_range)
-        y_black = yuv_const["Y_BLACK"]
-        y_white = yuv_const["Y_WHITE"]
-        
-        # Извлекаем Y-значения из якорных патчей
+        # Извлекаем значения из якорных патчей
         anchor_values = []
         
         for patch in anchor_patches:
-            y_values = frame['Y'][patch.y_range[0]:patch.y_range[1], 
-                            patch.x_range[0]:patch.x_range[1]]
+            # Получаем RGB значения патча
+            patch_rgb = frame[patch.y_range[0]:patch.y_range[1], 
+                           patch.x_range[0]:patch.x_range[1]]
             
             # Делим патч на 4 квадранта
-            h, w = y_values.shape
+            h, w, _ = patch_rgb.shape
             half_h, half_w = h // 2, w // 2
             
             quadrants = [
-                y_values[:half_h, :half_w],       # верхний левый
-                y_values[:half_h, half_w:],       # верхний правый
-                y_values[half_h:, :half_w],       # нижний левый
-                y_values[half_h:, half_w:]        # нижний правый
+                patch_rgb[:half_h, :half_w],       # верхний левый
+                patch_rgb[:half_h, half_w:],       # верхний правый
+                patch_rgb[half_h:, :half_w],       # нижний левый
+                patch_rgb[half_h:, half_w:]        # нижний правый
             ]
             
-            quadrant_means = [np.mean(q) for q in quadrants]
+            # Преобразуем в значения яркости
+            quadrant_means = [np.mean(q.mean(axis=2)) for q in quadrants]
             anchor_values.append(quadrant_means)
         
         # Проверка паттерна якорей
@@ -280,7 +277,7 @@ class VisualValidationProcessor:
         # Конечная метка: 1-й патч (БЧ/ЧБ), 2-й патч (ЧБ/БЧ)
         
         # Пороговое значение для определения черного и белого
-        threshold = (y_black + y_white) / 2
+        threshold = 128
         
         # Проверка контраста квадрантов
         valid = True
@@ -303,7 +300,7 @@ class VisualValidationProcessor:
                     valid = valid and (values[1] > threshold and values[2] > threshold)  # ББ
         
         # Проверка контраста между квадрантами (должна быть существенная разница)
-        min_contrast = 20  # Минимальная разница между черным и белым значениями
+        min_contrast = 50  # Минимальная разница между черным и белым значениями
         
         for values in anchor_values:
             black_values = [values[0], values[3]] if values[0] < threshold else [values[1], values[2]]
@@ -319,60 +316,39 @@ class VisualValidationProcessor:
         
         return valid
         
-    def _save_marker_debug_image(
+    def _save_rgb_marker_debug_image(
         self, 
-        frame: Dict[str, np.ndarray], 
+        frame: np.ndarray, 
         marker_patches: List[Any],
         binary_str: str,
         checksum_binary: str,
         expected_checksum: str,
         diagnostics: Dict[str, Any],
-        output_path: Path,
-        color_range: str = ColorRange.LIMITED
+        output_path: Path
     ) -> None:
         """
-        Сохраняет подробное отладочное изображение маркера.
+        Сохраняет подробное отладочное изображение маркера из RGB кадра.
         
         Args:
-            frame: Буфер кадра
+            frame: RGB кадр
             marker_patches: Список индексов маркерных патчей
             binary_str: Двоичная строка идентификатора
             checksum_binary: Двоичная строка контрольной суммы
             expected_checksum: Ожидаемая контрольная сумма
             diagnostics: Диагностические данные
             output_path: Путь для сохранения изображения
-            color_range: Цветовой диапазон
         """
-        # Преобразуем YUV в RGB для визуализации с учетом цветового диапазона
-        h, w = frame['Y'].shape
+        # Создаем копию кадра для рисования
+        debug_frame = frame.copy()
         
-        # Определяем формат по размерам UV плоскостей
-        chroma_format = self._detect_chroma_format(frame)
-        
-        # Масштабируем UV до размеров Y для визуализации
-        if chroma_format == ChromaFormat.YUV_420:
-            u_resized = cv2.resize(frame['U'], (w, h), interpolation=cv2.INTER_NEAREST)
-            v_resized = cv2.resize(frame['V'], (w, h), interpolation=cv2.INTER_NEAREST)
-        elif chroma_format == ChromaFormat.YUV_422:
-            # В 422 нужно масштабировать только по ширине
-            u_resized = cv2.resize(frame['U'], (w, h), interpolation=cv2.INTER_NEAREST)
-            v_resized = cv2.resize(frame['V'], (w, h), interpolation=cv2.INTER_NEAREST)
-        else:  # YUV_444
-            # В 444 UV уже имеют полное разрешение
-            u_resized = frame['U']
-            v_resized = frame['V']
-        
-        # Преобразуем в RGB с учетом цветового диапазона
-        rgb = yuv_to_rgb_bt709(frame['Y'], u_resized, v_resized, color_range)
-        
-        # Создаем увеличенное изображение для лучшей видимости
         # Определяем область, содержащую все маркерные патчи
         tech_row_idx = marker_patches[0].y_range[0]  # Верхняя координата Y технической строки
         tech_row_height = marker_patches[0].y_range[1] - marker_patches[0].y_range[0]
         
         # Вырезаем регион, содержащий техническую строку, с небольшим запасом сверху и снизу
         padding = tech_row_height // 2
-        tech_region = rgb[max(0, tech_row_idx - padding):min(h, tech_row_idx + tech_row_height + padding), :].copy()
+        h, w, _ = frame.shape
+        tech_region = debug_frame[max(0, tech_row_idx - padding):min(h, tech_row_idx + tech_row_height + padding), :].copy()
         
         # Увеличиваем в 2 раза для лучшей видимости
         scale_factor = 2
@@ -382,11 +358,8 @@ class VisualValidationProcessor:
             interpolation=cv2.INTER_NEAREST
         )
         
-        # Получаем константы для определения порога
-        yuv_const = get_yuv_constants(color_range)
-        y_black = yuv_const["Y_BLACK"]
-        y_white = yuv_const["Y_WHITE"]
-        threshold = (y_black + y_white) / 2
+        # Пороговое значение для определения бита
+        threshold = 128
         
         # Рисуем информацию о маркерных патчах
         # Патчи идентификатора
@@ -465,7 +438,7 @@ class VisualValidationProcessor:
                   (0, 255, 0) if checksum_binary == expected_checksum else (0, 0, 255), 1)
         y_pos += 30
         
-        cv2.putText(info_img, f"Threshold: {threshold:.1f}, Format: {chroma_format}, Range: {color_range}", 
+        cv2.putText(info_img, f"Threshold: {threshold}", 
                   (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
         y_pos += 30
         
@@ -480,60 +453,27 @@ class VisualValidationProcessor:
         
         # Сохраняем изображение
         cv2.imwrite(str(output_path), final_img)
-        
-    def _detect_chroma_format(self, frame: Dict[str, np.ndarray]) -> str:
-        """
-        Определяет формат цветовой субдискретизации по размерам плоскостей YUV.
-        
-        Args:
-            frame: Буфер кадра с Y, U и V плоскостями
-            
-        Returns:
-            str: Формат цветовой субдискретизации (420, 422, 444)
-        """
-        h, w = frame['Y'].shape
-        
-        if frame['U'].shape == (h // 2, w // 2):
-            return ChromaFormat.YUV_420
-        elif frame['U'].shape == (h, w // 2):
-            return ChromaFormat.YUV_422
-        elif frame['U'].shape == (h, w):
-            return ChromaFormat.YUV_444
-        else:
-            # Не удалось определить, возвращаем стандартный формат
-            print(f"Предупреждение: Не удалось определить формат YUV. Y: {frame['Y'].shape}, U: {frame['U'].shape}")
-            return ChromaFormat.YUV_422
     
-    def extract_patch_values(
+    def extract_rgb_patch_values(
         self, 
-        frame: Dict[str, np.ndarray], 
-        patches_metadata: List[Dict[str, Any]], 
-        chroma_format: str = None,
-        color_range: str = ColorRange.LIMITED
+        frame: np.ndarray, 
+        patches_metadata: List[Dict[str, Any]]
     ) -> List[Tuple[float, float, float]]:
         """
-        Извлекает средние значения YUV из патчей с учётом формата.
+        Извлекает средние значения RGB из патчей.
         
         Args:
-            frame: Буфер кадра
+            frame: RGB кадр
             patches_metadata: Метаданные о патчах
-            chroma_format: Формат цветовой субдискретизации (если None, определяется автоматически)
-            color_range: Цветовой диапазон
             
         Returns:
-            List[Tuple[float, float, float]]: Список средних значений YUV для каждого патча
+            List[Tuple[float, float, float]]: Список средних значений RGB для каждого патча
         """
-        # Определяем формат, если не указан
-        if chroma_format is None:
-            chroma_format = self._detect_chroma_format(frame)
-            
         patch_values = []
         
         for patch in patches_metadata:
             y_range = tuple(patch["y_range"])
             x_range = tuple(patch["x_range"])
-            y_uv_range = tuple(patch["y_uv_range"])
-            x_uv_range = tuple(patch["x_uv_range"])
             
             # Игнорируем крайние пиксели для более точного измерения
             border = 2
@@ -547,183 +487,94 @@ class VisualValidationProcessor:
                 x_min += border
                 x_max -= border
             
-            # Для UV координаты зависят от формата
-            y_uv_min, y_uv_max = y_uv_range
-            x_uv_min, x_uv_max = x_uv_range
-            
-            # Корректируем границы для UV с учетом формата
-            if chroma_format == ChromaFormat.YUV_420:
-                # Для 420 делим по обоим измерениям
-                if y_uv_max - y_uv_min > 2 and x_uv_max - x_uv_min > 2:
-                    y_uv_min += 1
-                    y_uv_max -= 1
-                    x_uv_min += 1
-                    x_uv_max -= 1
-            elif chroma_format == ChromaFormat.YUV_422:
-                # Для 422 делим только по ширине
-                if x_uv_max - x_uv_min > 2:
-                    x_uv_min += 1
-                    x_uv_max -= 1
-                    
-                    # Для высоты используем такие же границы, как и для Y, но с учетом размера UV
-                    if y_uv_max - y_uv_min == y_max - y_min:
-                        y_uv_min = y_min
-                        y_uv_max = y_max
-            elif chroma_format == ChromaFormat.YUV_444:
-                # Для 444 используем те же границы, что и для Y
-                if y_uv_max - y_uv_min > 2*border and x_uv_max - x_uv_min > 2*border:
-                    y_uv_min = y_min
-                    y_uv_max = y_max
-                    x_uv_min = x_min
-                    x_uv_max = x_max
-            
             # Проверяем, что координаты в допустимых пределах
-            h_y, w_y = frame['Y'].shape
-            h_u, w_u = frame['U'].shape
-            h_v, w_v = frame['V'].shape
+            h, w, _ = frame.shape
             
-            y_min = max(0, min(y_min, h_y - 1))
-            y_max = max(y_min + 1, min(y_max, h_y))
-            x_min = max(0, min(x_min, w_y - 1))
-            x_max = max(x_min + 1, min(x_max, w_y))
+            y_min = max(0, min(y_min, h - 1))
+            y_max = max(y_min + 1, min(y_max, h))
+            x_min = max(0, min(x_min, w - 1))
+            x_max = max(x_min + 1, min(x_max, w))
             
-            y_uv_min = max(0, min(y_uv_min, h_u - 1))
-            y_uv_max = max(y_uv_min + 1, min(y_uv_max, h_u))
-            x_uv_min = max(0, min(x_uv_min, w_u - 1))
-            x_uv_max = max(x_uv_min + 1, min(x_uv_max, w_u))
-            
-            # Извлекаем патчи
-            y_patch = frame['Y'][y_min:y_max, x_min:x_max]
-            u_patch = frame['U'][y_uv_min:y_uv_max, x_uv_min:x_uv_max]
-            v_patch = frame['V'][y_uv_min:y_uv_max, x_uv_min:x_uv_max]
+            # Извлекаем патч
+            rgb_patch = frame[y_min:y_max, x_min:x_max]
             
             # Создаем гауссово ядро для взвешенного усреднения
-            h, w = y_patch.shape
-            y_grid, x_grid = np.mgrid[0:h, 0:w]
-            center_y, center_x = h//2, w//2
-            sigma = max(h, w) / 5.0
+            patch_h, patch_w, _ = rgb_patch.shape
+            y_grid, x_grid = np.mgrid[0:patch_h, 0:patch_w]
+            center_y, center_x = patch_h//2, patch_w//2
+            sigma = max(patch_h, patch_w) / 5.0
             
             weights = np.exp(-((x_grid - center_x)**2 + (y_grid - center_y)**2) / (2*sigma**2))
-            weights /= weights.sum()
+            weights = weights[:, :, np.newaxis]  # Расширяем для трех каналов
+            weights = weights / weights.sum()
             
-            # Взвешенное среднее для Y
-            y_mean = float(np.sum(y_patch * weights))
+            # Взвешенное среднее для каждого канала RGB
+            r_mean = float(np.sum(rgb_patch[:, :, 0] * weights[:, :, 0]))
+            g_mean = float(np.sum(rgb_patch[:, :, 1] * weights[:, :, 0]))
+            b_mean = float(np.sum(rgb_patch[:, :, 2] * weights[:, :, 0]))
             
-            # Адаптируем веса для UV в зависимости от формата
-            h_uv, w_uv = u_patch.shape
-            
-            if chroma_format == ChromaFormat.YUV_420:
-                # Создаем новое ядро для 420
-                uv_y_grid, uv_x_grid = np.mgrid[0:h_uv, 0:w_uv]
-                uv_center_y, uv_center_x = h_uv//2, w_uv//2
-                uv_sigma = max(h_uv, w_uv) / 5.0
-                weights_uv = np.exp(-((uv_x_grid - uv_center_x)**2 + (uv_y_grid - uv_center_y)**2) / (2*uv_sigma**2))
-            elif chroma_format == ChromaFormat.YUV_422:
-                # В 422 высота такая же, нужно изменить только ширину
-                if h_uv == h:
-                    # Создаем новое ядро для 422
-                    uv_y_grid, uv_x_grid = np.mgrid[0:h_uv, 0:w_uv]
-                    uv_center_y, uv_center_x = h_uv//2, w_uv//2
-                    uv_sigma = max(h_uv, w_uv) / 5.0
-                    weights_uv = np.exp(-((uv_x_grid - uv_center_x)**2 + (uv_y_grid - uv_center_y)**2) / (2*uv_sigma**2))
-                else:
-                    # Масштабируем веса
-                    weights_uv = cv2.resize(weights, (w_uv, h_uv))
-            elif chroma_format == ChromaFormat.YUV_444:
-                # В 444 размеры такие же
-                weights_uv = weights
-            else:
-                # Если формат не определен, пытаемся масштабировать
-                weights_uv = cv2.resize(weights, (w_uv, h_uv))
-            
-            weights_uv /= weights_uv.sum()
-            
-            # Взвешенное среднее для U и V
-            u_mean = float(np.sum(u_patch * weights_uv))
-            v_mean = float(np.sum(v_patch * weights_uv))
-            
-            patch_values.append((y_mean, u_mean, v_mean))
+            patch_values.append((r_mean, g_mean, b_mean))
         
         return patch_values
     
-    def compare_patch_values(
+    def compare_rgb_patch_values(
         self, 
         extracted_values: List[Tuple[float, float, float]], 
-        expected_values: List[Dict[str, Any]], 
-        deviation: int = 4,
-        color_range: str = ColorRange.LIMITED
+        expected_colors: List[List[int]], 
+        deviation: int = 10
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """
-        Сравнивает извлеченные значения патчей с ожидаемыми.
+        Сравнивает извлеченные значения RGB патчей с ожидаемыми.
         
         Args:
-            extracted_values: Извлеченные значения YUV
-            expected_values: Ожидаемые значения из метаданных
+            extracted_values: Извлеченные значения RGB
+            expected_colors: Ожидаемые RGB значения
             deviation: Допустимое отклонение
-            color_range: Цветовой диапазон
             
         Returns:
             Tuple[bool, List[Dict[str, Any]]]: Результат сравнения и статистика по каждому патчу
         """
-        if len(extracted_values) != len(expected_values):
-            print(f"Несоответствие количества патчей: извлечено {len(extracted_values)}, ожидалось {len(expected_values)}")
+        if len(extracted_values) != len(expected_colors):
+            print(f"Несоответствие количества патчей: извлечено {len(extracted_values)}, ожидалось {len(expected_colors)}")
             return False, []
-        
-        # Проверяем цветовой диапазон в метаданных
-        metadata_range = expected_values[0].get("format", {}).get("color_range", color_range)
-        if metadata_range != color_range:
-            print(f"Предупреждение: Цветовой диапазон в метаданных ({metadata_range}) не соответствует указанному ({color_range})")
         
         comparison_results = []
         all_valid = True
         errors_count = 0
         
-        for i, (extracted, expected) in enumerate(zip(extracted_values, expected_values)):
-            y_extracted, u_extracted, v_extracted = extracted
+        for i, (extracted, expected) in enumerate(zip(extracted_values, expected_colors)):
+            r_extracted, g_extracted, b_extracted = extracted
+            r_expected, g_expected, b_expected = expected
             
-            # Проверяем наличие ожидаемых значений YUV
-            if "y_value" in expected and "u_value" in expected and "v_value" in expected:
-                y_expected = expected["y_value"]
-                u_expected = expected["u_value"]
-                v_expected = expected["v_value"]
-                
-                # Вычисляем разницу
-                y_diff = abs(y_extracted - y_expected)
-                u_diff = abs(u_extracted - u_expected)
-                v_diff = abs(v_extracted - v_expected)
-                
-                # Проверяем, находится ли разница в пределах допустимого отклонения
-                is_valid = (y_diff <= deviation and u_diff <= deviation and v_diff <= deviation)
-                
-                # Собираем результаты сравнения
-                result = {
-                    "patch_idx": i,
-                    "y_expected": y_expected,
-                    "u_expected": u_expected,
-                    "v_expected": v_expected,
-                    "y_extracted": y_extracted,
-                    "u_extracted": u_extracted,
-                    "v_extracted": v_extracted,
-                    "y_diff": y_diff,
-                    "u_diff": u_diff,
-                    "v_diff": v_diff,
-                    "is_valid": is_valid
-                }
-                
-                comparison_results.append(result)
-                
-                if not is_valid:
-                    errors_count += 1
-                    if errors_count <= 5:  # Ограничиваем вывод ошибок
-                        print(f"Ошибка патча {i}: Y={y_diff:.1f}, U={u_diff:.1f}, V={v_diff:.1f} > {deviation}")
-                    all_valid = False
-            else:
-                # Если ожидаемых значений нет, считаем патч недействительным
-                comparison_results.append({
-                    "patch_idx": i,
-                    "is_valid": False,
-                    "error": "Отсутствуют ожидаемые значения YUV"
-                })
+            # Вычисляем разницу по каждому каналу
+            r_diff = abs(r_extracted - r_expected)
+            g_diff = abs(g_extracted - g_expected)
+            b_diff = abs(b_extracted - b_expected)
+            
+            # Проверяем, находится ли разница в пределах допустимого отклонения
+            is_valid = (r_diff <= deviation and g_diff <= deviation and b_diff <= deviation)
+            
+            # Собираем результаты сравнения
+            result = {
+                "patch_idx": i,
+                "r_expected": r_expected,
+                "g_expected": g_expected,
+                "b_expected": b_expected,
+                "r_extracted": r_extracted,
+                "g_extracted": g_extracted,
+                "b_extracted": b_extracted,
+                "r_diff": r_diff,
+                "g_diff": g_diff,
+                "b_diff": b_diff,
+                "is_valid": is_valid
+            }
+            
+            comparison_results.append(result)
+            
+            if not is_valid:
+                errors_count += 1
+                if errors_count <= 5:  # Ограничиваем вывод ошибок
+                    print(f"Ошибка патча {i}: R={r_diff:.1f}, G={g_diff:.1f}, B={b_diff:.1f} > {deviation}")
                 all_valid = False
         
         if errors_count > 5:
@@ -731,48 +582,24 @@ class VisualValidationProcessor:
             
         return all_valid, comparison_results
     
-    def create_comparison_visualization(
+    def create_rgb_comparison_visualization(
         self, 
-        frame: Dict[str, np.ndarray], 
+        frame: np.ndarray, 
         comparison_results: List[Dict[str, Any]], 
         patches_metadata: List[Dict[str, Any]], 
-        output_path: Path,
-        color_range: str = ColorRange.LIMITED
+        output_path: Path
     ) -> None:
         """
-        Создает визуализацию сравнения патчей.
+        Создает визуализацию сравнения RGB патчей.
         
         Args:
-            frame: Буфер кадра
+            frame: RGB кадр
             comparison_results: Результаты сравнения
             patches_metadata: Метаданные о патчах
             output_path: Путь для сохранения визуализации
-            color_range: Цветовой диапазон
         """
-        # Определяем формат цветовой субдискретизации
-        chroma_format = self._detect_chroma_format(frame)
-        
-        # Преобразуем YUV в RGB для визуализации
-        h, w = frame['Y'].shape
-        
-        # Масштабируем UV до размеров Y для визуализации
-        if chroma_format == ChromaFormat.YUV_420:
-            u_resized = cv2.resize(frame['U'], (w, h), interpolation=cv2.INTER_NEAREST)
-            v_resized = cv2.resize(frame['V'], (w, h), interpolation=cv2.INTER_NEAREST)
-        elif chroma_format == ChromaFormat.YUV_422:
-            # В 422 нужно масштабировать только по ширине
-            u_resized = cv2.resize(frame['U'], (w, h), interpolation=cv2.INTER_NEAREST)
-            v_resized = cv2.resize(frame['V'], (w, h), interpolation=cv2.INTER_NEAREST)
-        else:  # YUV_444
-            # В 444 UV уже имеют полное разрешение
-            u_resized = frame['U']
-            v_resized = frame['V']
-        
-        # Преобразуем в RGB с учетом цветового диапазона
-        rgb = yuv_to_rgb_bt709(frame['Y'], u_resized, v_resized, color_range)
-        
         # Создаем копию для визуализации
-        viz_img = rgb.copy()
+        viz_img = frame.copy()
         
         # Считаем количество успешных и ошибочных патчей
         valid_count = sum(1 for r in comparison_results if r.get("is_valid", False))
@@ -781,8 +608,6 @@ class VisualValidationProcessor:
         # Добавляем информацию о результатах
         cv2.putText(viz_img, f"Valid: {valid_count}/{len(comparison_results)} ({valid_count/len(comparison_results)*100:.1f}%)", 
                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(viz_img, f"Format: {chroma_format}, Range: {color_range}", 
-                  (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
         # Отмечаем патчи с ошибками
         error_count = 0
@@ -806,203 +631,173 @@ class VisualValidationProcessor:
             cv2.rectangle(viz_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
             
             # Добавляем текст с разницей
-            if "y_diff" in result and "u_diff" in result and "v_diff" in result:
+            if "r_diff" in result and "g_diff" in result and "b_diff" in result:
                 if (error_count % 10 == 0):  # Отображаем текст только для каждого 10-го патча
-                    diff_text = f"Y:{result['y_diff']:.1f} U:{result['u_diff']:.1f} V:{result['v_diff']:.1f}"
+                    diff_text = f"R:{result['r_diff']:.1f} G:{result['g_diff']:.1f} B:{result['b_diff']:.1f}"
                     cv2.putText(viz_img, diff_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
         
         # Сохраняем визуализацию
         cv2.imwrite(str(output_path), viz_img)
     
-    def visual_validate(
-        self, 
-        video_processor,
-        y4m_path: Path, 
+    def rgb_visual_validate(
+        self,
+        video_path: Path, 
         pattern_generator, 
         frames_per_pattern: int, 
         intro_frames_count: int = 0, 
-        deviation: int = 4,
-        max_miss_percent: float = 0.002,
-        chroma_format: str = None,
-        color_range: str = None
+        deviation: int = 10,
+        max_miss_percent: float = 0.002
     ) -> Tuple[bool, Dict[str, Any]]:
         """
-        Выполняет визуальную валидацию видео с паттернами.
+        Выполняет RGB-ориентированную визуальную валидацию видео с паттернами.
         
         Args:
-            video_processor: Объект VideoProcessor для чтения кадров
-            y4m_path: Путь к Y4M файлу
+            video_path: Путь к видеофайлу
             pattern_generator: Генератор паттернов
             frames_per_pattern: Количество кадров на один паттерн
             intro_frames_count: Количество вводных кадров для пропуска
-            deviation: Допустимое отклонение значений
+            deviation: Допустимое отклонение значений RGB
             max_miss_percent: Максимальный допустимый процент ошибок
-            chroma_format: Формат цветовой субдискретизации (если None, определяется из pattern_generator)
-            color_range: Цветовой диапазон (если None, определяется из pattern_generator)
             
         Returns:
             Tuple[bool, Dict[str, Any]]: Результат валидации и статистика
         """
-        # Определяем формат и диапазон, если не указаны
-        if chroma_format is None and hasattr(pattern_generator, 'chroma_subsampling'):
-            chroma_format = pattern_generator.chroma_subsampling
-        
-        if color_range is None and hasattr(pattern_generator, 'color_range'):
-            color_range = pattern_generator.color_range
-        
         # Статистика валидации
         validation_stats = {
             "total_frames": 0,
             "valid_frames": 0,
             "invalid_frames": 0,
             "detected_patterns": [],
-            "error_patterns": [],
-            "chroma_format": chroma_format,
-            "color_range": color_range
+            "error_patterns": []
         }
         
         # Создаем директорию для визуализаций, если нужно
         if self.debug_mode and self.debug_dir:
-            visual_debug_dir = self.debug_dir / "visual_validation"
+            visual_debug_dir = self.debug_dir / "rgb_visual_validation"
             visual_debug_dir.mkdir(exist_ok=True)
         
-        # Читаем параметры из заголовка Y4M
-        file_params = video_processor.parse_y4m_header(y4m_path)
+        # Открываем видео напрямую через OpenCV
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            print(f"Ошибка: не удалось открыть видео {video_path}")
+            return False, validation_stats
         
-        # Используем параметры из файла, если они отличаются от указанных
-        actual_chroma_format = file_params.get('chroma_format', chroma_format)
-        actual_color_range = file_params.get('color_range', color_range)
-        width = file_params.get('width', pattern_generator.width)
-        height = file_params.get('height', pattern_generator.height)
-        
-        with open(y4m_path, 'rb') as f:
-            # Читаем заголовок Y4M
-            header = f.readline().decode('ascii')
+        # Пропускаем кадры вводной последовательности
+        for _ in range(intro_frames_count):
+            cap.read()
             
-            # Проверяем настройки маркеров для отладки
-            if self.debug_mode:
-                technical_row_y = pattern_generator.tech_row * (pattern_generator.patch_size + pattern_generator.patch_gap)
-                print(f"Technical row should start at Y: {technical_row_y}")
-                print(f"Total frame height: {height}")
-                print(f"Marker indices count: {len(pattern_generator.marker_indices)}")
-                print(f"Format: {actual_chroma_format}, Range: {actual_color_range}")
+        # ИЗМЕНЕНИЕ: Используем диапазон с 1 до patterns_count+1
+        print(f"Validating patterns with indices from 1 to {pattern_generator.patterns_count}")
+        
+        with tqdm(total=pattern_generator.patterns_count, desc="RGB визуальная валидация") as pbar:
+            for pattern_idx in range(1, pattern_generator.patterns_count + 1):  # Начинаем с 1, а не с 0
+                # Получаем метаданные паттерна
+                pattern_metadata = self.metadata_handler.load_pattern_metadata(pattern_idx)
+                if not pattern_metadata:
+                    print(f"Ошибка: метаданные для паттерна {pattern_idx} не найдены")
+                    validation_stats["error_patterns"].append({
+                        "pattern_idx": pattern_idx,
+                        "error": "Метаданные не найдены"
+                    })
+                    continue
                 
-                # Верификация маркерных координат
-                if pattern_generator.marker_indices:
-                    first_marker = pattern_generator.patch_coords[pattern_generator.marker_indices[0]]
-                    print(f"First marker patch coordinates: {first_marker.y_range}")
-                    if first_marker.y_range[0] != technical_row_y:
-                        print(f"WARNING: Marker position mismatch! Expected Y={technical_row_y}, got Y={first_marker.y_range[0]}")
-                        
-            # Пропускаем кадры вводной последовательности
-            for _ in range(intro_frames_count):
-                _ = video_processor.read_y4m_frame(f, width, height, actual_chroma_format)
-            
-            # ИЗМЕНЕНИЕ: Используем диапазон с 1 до patterns_count+1 вместо 0 до patterns_count
-            print(f"Validating patterns with indices from 1 to {pattern_generator.patterns_count}")
-            with tqdm(total=pattern_generator.patterns_count, desc="Визуальная валидация") as pbar:
-                for pattern_idx in range(1, pattern_generator.patterns_count + 1):  # Начинаем с 1, а не с 0
-                    # Получаем метаданные паттерна
-                    pattern_metadata = self.metadata_handler.load_pattern_metadata(pattern_idx)
-                    if not pattern_metadata:
-                        print(f"Ошибка: метаданные для паттерна {pattern_idx} не найдены")
-                        validation_stats["error_patterns"].append({
-                            "pattern_idx": pattern_idx,
-                            "error": "Метаданные не найдены"
-                        })
+                # Получаем информацию о патчах и цветах
+                patches_metadata = pattern_metadata.get("patches", [])
+                expected_colors = pattern_metadata.get("colors", [])
+                
+                # Обрабатываем только первый кадр из каждого паттерна для валидации
+                for frame_idx in range(frames_per_pattern):
+                    ret, frame = cap.read()
+                    validation_stats["total_frames"] += 1
+                    
+                    if not ret:
+                        print(f"Ошибка чтения кадра (паттерн {pattern_idx}, кадр {frame_idx})")
+                        validation_stats["invalid_frames"] += 1
                         continue
                     
-                    # Получаем информацию о патчах
-                    patches_metadata = pattern_metadata.get("patches", [])
+                    # Преобразуем BGR (OpenCV) в RGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     
-                    # Обрабатываем только первый кадр из каждого паттерна для валидации
-                    for frame_idx in range(frames_per_pattern):
-                        frame = video_processor.read_y4m_frame(f, width, height, actual_chroma_format)
-                        validation_stats["total_frames"] += 1
+                    # Для первого кадра каждого паттерна выполняем проверку
+                    if frame_idx == 0:
+                        # Считываем маркер паттерна
+                        detected_pattern_idx, marker_diagnostics = self.read_pattern_marker(
+                            frame_rgb, pattern_generator)
                         
-                        if frame is None:
-                            print(f"Ошибка чтения кадра (паттерн {pattern_idx}, кадр {frame_idx})")
+                        if detected_pattern_idx == -1:
+                            print(f"Ошибка чтения маркера в кадре (ожидаемый паттерн {pattern_idx})")
                             validation_stats["invalid_frames"] += 1
+                            validation_stats["error_patterns"].append({
+                                "pattern_idx": pattern_idx,
+                                "error": "Ошибка чтения маркера",
+                                "marker_diagnostics": marker_diagnostics
+                            })
                             continue
                         
-                        # Для первого кадра каждого паттерна выполняем проверку
-                        if frame_idx == 0:
-                            # Считываем маркер паттерна с учетом цветового диапазона
-                            detected_pattern_idx, marker_diagnostics = self.read_pattern_marker(
-                                frame, pattern_generator, color_range=actual_color_range)
-                            
-                            if detected_pattern_idx == -1:
-                                print(f"Ошибка чтения маркера в кадре (ожидаемый паттерн {pattern_idx})")
-                                validation_stats["invalid_frames"] += 1
-                                validation_stats["error_patterns"].append({
-                                    "pattern_idx": pattern_idx,
-                                    "error": "Ошибка чтения маркера",
-                                    "marker_diagnostics": marker_diagnostics
-                                })
-                                continue
-                            
-                            # Проверяем, совпадает ли считанный паттерн с ожидаемым
-                            if detected_pattern_idx != pattern_idx:
-                                print(f"Несоответствие номера паттерна: обнаружен {detected_pattern_idx}, ожидался {pattern_idx}")
-                                validation_stats["invalid_frames"] += 1
-                                validation_stats["error_patterns"].append({
-                                    "pattern_idx": pattern_idx,
-                                    "detected_pattern_idx": detected_pattern_idx,
-                                    "error": "Несоответствие номера паттерна"
-                                })
-                                continue
-                            
-                            # Извлекаем значения патчей с учетом формата и диапазона
-                            extracted_values = self.extract_patch_values(
-                                frame, patches_metadata, actual_chroma_format, actual_color_range)
-                            
-                            # Сравниваем с ожидаемыми значениями
-                            is_valid, comparison_results = self.compare_patch_values(
-                                extracted_values, patches_metadata, deviation, actual_color_range)
-                            
-                            if is_valid:
-                                validation_stats["valid_frames"] += 1
-                                validation_stats["detected_patterns"].append({
-                                    "pattern_idx": pattern_idx,
-                                    "is_valid": True
-                                })
-                            else:
-                                validation_stats["invalid_frames"] += 1
-                                validation_stats["error_patterns"].append({
-                                    "pattern_idx": pattern_idx,
-                                    "is_valid": False,
-                                    "comparison_results": comparison_results
-                                })
-                                
-                                # Создаем визуализацию для отладки
-                                if self.debug_mode and self.debug_dir:
-                                    viz_path = visual_debug_dir / f"pattern_{pattern_idx}_errors.png"
-                                    self.create_comparison_visualization(
-                                        frame, comparison_results, patches_metadata, viz_path, actual_color_range)
+                        # Проверяем, совпадает ли считанный паттерн с ожидаемым
+                        if detected_pattern_idx != pattern_idx:
+                            print(f"Несоответствие номера паттерна: обнаружен {detected_pattern_idx}, ожидался {pattern_idx}")
+                            validation_stats["invalid_frames"] += 1
+                            validation_stats["error_patterns"].append({
+                                "pattern_idx": pattern_idx,
+                                "detected_pattern_idx": detected_pattern_idx,
+                                "error": "Несоответствие номера паттерна"
+                            })
+                            continue
+                        
+                        # Извлекаем RGB значения патчей
+                        extracted_values = self.extract_rgb_patch_values(
+                            frame_rgb, patches_metadata)
+                        
+                        # Сравниваем с ожидаемыми RGB значениями
+                        is_valid, comparison_results = self.compare_rgb_patch_values(
+                            extracted_values, expected_colors, deviation)
+                        
+                        if is_valid:
+                            validation_stats["valid_frames"] += 1
+                            validation_stats["detected_patterns"].append({
+                                "pattern_idx": pattern_idx,
+                                "is_valid": True
+                            })
                         else:
-                            # Остальные кадры в паттерне - считаем валидными, если первый валидный
-                            if validation_stats["detected_patterns"] and validation_stats["detected_patterns"][-1]["pattern_idx"] == pattern_idx:
-                                validation_stats["valid_frames"] += 1
-                            else:
-                                validation_stats["invalid_frames"] += 1
-                    
-                    pbar.update(1)
+                            validation_stats["invalid_frames"] += 1
+                            validation_stats["error_patterns"].append({
+                                "pattern_idx": pattern_idx,
+                                "is_valid": False,
+                                "comparison_results": comparison_results
+                            })
+                            
+                            # Создаем визуализацию для отладки
+                            if self.debug_mode and self.debug_dir:
+                                viz_path = visual_debug_dir / f"rgb_pattern_{pattern_idx}_errors.png"
+                                self.create_rgb_comparison_visualization(
+                                    frame_rgb, comparison_results, patches_metadata, viz_path)
+                    else:
+                        # Остальные кадры в паттерне - считаем валидными, если первый валидный
+                        if validation_stats["detected_patterns"] and validation_stats["detected_patterns"][-1]["pattern_idx"] == pattern_idx:
+                            validation_stats["valid_frames"] += 1
+                        else:
+                            validation_stats["invalid_frames"] += 1
+                
+                pbar.update(1)
+        
+        # Закрываем видео
+        cap.release()
             
-            # Вычисляем общий результат
-            total_expected_frames = pattern_generator.patterns_count * frames_per_pattern
-            validation_success = (validation_stats["valid_frames"] / total_expected_frames) >= (1 - max_miss_percent)
-            
-            print(f"Визуальная валидация завершена: "
-                    f"проверено {validation_stats['total_frames']} кадров, "
-                    f"валидных {validation_stats['valid_frames']}, "
-                    f"недействительных {validation_stats['invalid_frames']}")
-            print(f"Формат: {actual_chroma_format}, Диапазон: {actual_color_range}")
-            
-            # Сохраняем результаты валидации
-            if self.debug_mode and self.debug_dir:
-                validation_results_path = self.debug_dir / "visual_validation_results.json"
-                import json
-                with open(validation_results_path, 'w') as f:
-                    json.dump(validation_stats, f, indent=2)
-            
-            return validation_success, validation_stats
+        # Вычисляем общий результат
+        total_expected_frames = pattern_generator.patterns_count * frames_per_pattern
+        validation_success = (validation_stats["valid_frames"] / total_expected_frames) >= (1 - max_miss_percent)
+        
+        print(f"RGB визуальная валидация завершена: "
+                f"проверено {validation_stats['total_frames']} кадров, "
+                f"валидных {validation_stats['valid_frames']}, "
+                f"недействительных {validation_stats['invalid_frames']}")
+        
+        # Сохраняем результаты валидации
+        if self.debug_mode and self.debug_dir:
+            validation_results_path = self.debug_dir / "rgb_visual_validation_results.json"
+            import json
+            with open(validation_results_path, 'w') as f:
+                json.dump(validation_stats, f, indent=2)
+        
+        return validation_success, validation_stats

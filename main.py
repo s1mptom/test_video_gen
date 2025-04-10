@@ -172,7 +172,9 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
     mp4_path = video_processor.encode_video(
         y4m_path, 
         output_name=args.output_name,
-        color_range=color_range
+        color_range=color_range,
+        bit_depth=args.bit_depth,
+        chroma_format=chroma_format
     )
     
     # Декодируем для валидации с учетом формата и диапазона
@@ -194,7 +196,8 @@ def generate_and_validate(args: argparse.Namespace) -> Tuple[bool, Optional[Path
         deviation=args.deviation,
         max_miss_percent=args.max_miss_percent,
         intro_frames_count=intro_frames_count,
-        chroma_format=chroma_format
+        chroma_format=chroma_format,
+        color_range=color_range
     )
     
     # Запускаем визуальную валидацию (если не отключена)

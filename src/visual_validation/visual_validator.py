@@ -574,7 +574,11 @@ class VisualValidationProcessor:
             if not is_valid:
                 errors_count += 1
                 if errors_count <= 5:  # Ограничиваем вывод ошибок
-                    print(f"Ошибка патча {i}: R={r_diff:.1f}, G={g_diff:.1f}, B={b_diff:.1f} > {deviation}")
+                    print(f"Ошибка патча {i}: R={r_diff:.1f}, G={g_diff:.1f}, B={b_diff:.1f} > {deviation} " +
+                        f"Ожидаемое: R={r_expected}, G={g_expected}, B={b_expected} " +
+                        f"Получено: R={r_extracted:.1f}, G={g_extracted:.1f}, B={b_extracted:.1f} " +
+                        f"Отклонение: R={r_diff:.1f}, G={g_diff:.1f}, B={b_diff:.1f} > {deviation}")
+
                 all_valid = False
         
         if errors_count > 5:

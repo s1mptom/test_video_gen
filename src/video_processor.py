@@ -423,7 +423,9 @@ class VideoProcessor:
         self, 
         y4m_path: Path, 
         output_name: str = "output.mp4",
-        color_range: str = ColorRange.LIMITED
+        color_range: str = ColorRange.LIMITED,
+        bit_depth: int = 8,
+        chroma_format: str = ChromaFormat.YUV_422
     ) -> Path:
         """
         Кодирует Y4M в видео файл с максимальным качеством.
@@ -443,14 +445,35 @@ class VideoProcessor:
         # Значение range для x265
         range_value = "full" if color_range == ColorRange.FULL else "limited"
         
+        if bit_depth == 10:
+            if chroma_format == ChromaFormat.YUV_420:
+                profile = "main10"
+            elif chroma_format == ChromaFormat.YUV_422:
+                profile = "main422-10"
+            elif chroma_format == ChromaFormat.YUV_444:
+                profile = "main444-10"
+            else:
+                profile = "main10"
+        else:
+            if chroma_format == ChromaFormat.YUV_420:
+                profile = "main"
+            elif chroma_format == ChromaFormat.YUV_422:
+                profile = "main422"
+            elif chroma_format == ChromaFormat.YUV_444:
+                profile = "main444"
+            else:
+                profile = "main"
+
         # Параметры для максимального качества
         cmd_hevc = [
             ENCODER_CMD,
             "--input", str(y4m_path), "--y4m",
             "--output", str(hevc_path),
-            "--profile", "main",
+            "--profile", profile,
             "--preset", "veryslow",
+            "--crf", "0",
             "--lossless",  # Используем lossless режим
+            "--no-sao",
             "--colorprim", "1",  # BT.709
             "--transfer", "1",   # BT.709
             "--colormatrix", "1", # BT.709

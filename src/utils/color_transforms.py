@@ -43,13 +43,22 @@ def rgb_to_yuv_bt709(
     u = -0.1146 * r_norm - 0.3854 * g_norm + 0.5000 * b_norm
     v = 0.5000 * r_norm - 0.4542 * g_norm - 0.0458 * b_norm
     
-    # Применяем выбранный диапазон
-    y_values = np.round(y_min + y * y_range).astype(np.uint8)
+    # Применяем выбранный диапазон (вычисления в float)
+    y_float = y_min + y * y_range
+    u_float = uv_neutral + u * uv_range
+    v_float = uv_neutral + v * uv_range
+
+    # Ограничиваем float значения стандартными диапазонами,
+    # Клиппим U и V, чтобы избежать максимального значения (UV_MAX)
+    y_clipped = np.clip(y_float, yuv_const["Y_MIN"], yuv_const["Y_MAX"])
+    u_clipped = np.clip(u_float, yuv_const["UV_MIN"], yuv_const["UV_MAX"])
+    v_clipped = np.clip(v_float, yuv_const["UV_MIN"], yuv_const["UV_MAX"])
     
-    # Для UV все еще используем половину диапазона
-    u_values = np.round(uv_neutral + u * (uv_range // 2)).astype(np.uint8)
-    v_values = np.round(uv_neutral + v * (uv_range // 2)).astype(np.uint8)
-    
+    # Округляем и конвертируем в uint8 ПОСЛЕ клиппинга
+    y_values = np.round(y_clipped).astype(np.uint8)
+    u_values = np.round(u_clipped).astype(np.uint8)
+    v_values = np.round(v_clipped).astype(np.uint8)
+
     return y_values, u_values, v_values
 
 
@@ -78,10 +87,10 @@ def yuv_to_rgb_bt709(
     uv_neutral = yuv_const["UV_NEUTRAL"]
     uv_range = yuv_const["UV_RANGE"]
     
-    # Нормализация YUV к [0, 1]
-    y_norm = (y.astype(np.float32) - y_min) / y_range
-    u_norm = (u.astype(np.float32) - uv_neutral) / (uv_range // 2)
-    v_norm = (v.astype(np.float32) - uv_neutral) / (uv_range // 2)
+    # Нормализация YUV к [0, 1] для Y и [-0.5, 0.5] для U/V
+    y_norm = (y.astype(np.float64) - y_min) / y_range
+    u_norm = (u.astype(np.float64) - uv_neutral) / uv_range 
+    v_norm = (v.astype(np.float64) - uv_neutral) / uv_range
     
     # Матрица преобразования BT.709
     r = y_norm + 1.5748 * v_norm
